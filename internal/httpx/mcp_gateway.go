@@ -198,9 +198,13 @@ func (s *Server) nodeToolHandler(name string) mcpsdk.ToolHandler {
 	}
 }
 
-func (s *Server) callNodeTool(ctx context.Context, name string, arguments map[string]any) (*mcpsdk.CallToolResult, error) {
+func (s *Server) callNodeTool(ctx context.Context, name string, arguments map[string]any) (response *mcpsdk.CallToolResult, responseErr error) {
 	nodeID, _ := arguments["node_id"].(string)
 	nodeID = strings.TrimSpace(nodeID)
+	workspaceID, _ := arguments["workspace_id"].(string)
+	workspaceID = strings.TrimSpace(workspaceID)
+	auditDone := s.beginNodeToolAudit(ctx, nodeID, workspaceID, name, arguments)
+	defer func() { auditDone(response, responseErr) }()
 	if nodeID == "" {
 		return s.gatewayToolResult(name, nil, errors.New("node_id is required"))
 	}
@@ -212,8 +216,6 @@ func (s *Server) callNodeTool(ctx context.Context, name string, arguments map[st
 		return s.gatewayToolResult(name, nil, fmt.Errorf("AgentDock node %s does not provide tool %s", nodeID, name))
 	}
 
-	workspaceID, _ := arguments["workspace_id"].(string)
-	workspaceID = strings.TrimSpace(workspaceID)
 	if workspaceID != "" {
 		if s.workspaces == nil {
 			return s.gatewayToolResult(name, nil, errors.New("Runtime Workspace store is unavailable"))

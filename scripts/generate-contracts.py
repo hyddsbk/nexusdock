@@ -915,6 +915,41 @@ def build_schemas() -> dict[str, dict[str, Any]]:
         {"ok": scalar("boolean", "请求是否成功。"), "items": array("Workspace 条目。", ref("RuntimeWorkspace"))},
         ("ok", "items"),
     )
+    schemas["RuntimeAuditActor"] = obj(
+        "Runtime 审计事件 Actor。",
+        {
+            "type": scalar("string", "Actor 类型。"),
+            "id": scalar("string", "Actor 稳定标识。"),
+        },
+        ("type", "id"),
+    )
+    schemas["RuntimeAuditEvent"] = obj(
+        "Append-only Runtime 工具审计事件。",
+        {
+            "id": scalar("string", "审计事件 ID。"),
+            "occurred_at": TIMESTAMP,
+            "actor": ref("RuntimeAuditActor"),
+            "action": scalar("string", "审计动作名。"),
+            "object_type": scalar("string", "被审计对象类型。"),
+            "object_id": scalar("string", "被审计对象标识。"),
+            "result": enum("调用结果。", ["succeeded", "failed"]),
+            "risk": enum("风险级别。", ["low", "medium", "high"]),
+            "approval": scalar("string", "审批状态。"),
+            "run_id": scalar("string", "可选 Run 关联标识。"),
+            "request_id": scalar("string", "可选 HTTP/MCP 请求关联标识。"),
+            "metadata": ref("JsonObject"),
+        },
+        ("id", "occurred_at", "actor", "action", "object_type", "object_id", "result", "risk", "approval"),
+    )
+    schemas["RuntimeAuditListResponse"] = obj(
+        "Runtime 审计事件列表。",
+        {
+            "ok": scalar("boolean", "请求是否成功。"),
+            "items": array("审计事件。", ref("RuntimeAuditEvent")),
+            "count": scalar("integer", "返回事件数量。", minimum=0),
+        },
+        ("ok", "items", "count"),
+    )
     return schemas
 
 def response(schema: dict[str, Any], description: str = "成功。") -> dict[str, Any]:
@@ -1221,6 +1256,20 @@ def build_openapi(schemas: dict[str, Any]) -> dict[str, Any]:
                 "初始化或重新生成私密笔记 age 密文",
                 request=body(ref("PrivateNoteMaintenanceRequest")),
                 success=ok(ref("PrivateNoteMaintenanceResponse")),
+            )
+        },
+        "/v1/runtime/audit": {
+            "get": operation(
+                "listRuntimeAudit",
+                "列出 append-only Runtime 工具审计事件",
+                params=[
+                    q("limit", "最大返回事件数。", "integer", minimum=1, maximum=500),
+                    q("workspace_id", "按 Runtime Workspace ID 过滤。"),
+                    q("node_id", "按 AgentDock 节点 ID 过滤。"),
+                    q("risk", "按风险级别过滤。", enum=["low", "medium", "high"]),
+                    q("result", "按调用结果过滤。", enum=["succeeded", "failed"]),
+                ],
+                success=ok(ref("RuntimeAuditListResponse")),
             )
         },
         "/v1/runtime/workspaces": {

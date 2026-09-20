@@ -125,6 +125,7 @@ type runtimeSkillFileContent struct {
 func (s *Server) registerRuntimeRoutes(mux *http.ServeMux, protected func(http.HandlerFunc) http.HandlerFunc) {
 	s.registerAgentDockNodeRoutes(mux, protected)
 	s.registerRuntimeWorkspaceRoutes(mux, protected)
+	s.registerRuntimeAuditRoutes(mux, protected)
 	mux.HandleFunc("GET /v1/runtime/nodes/{nodeID}/overview", protected(s.runtimeOverview))
 	mux.HandleFunc("GET /v1/runtime/nodes/{nodeID}/tasks", protected(s.runtimeTasks))
 	mux.HandleFunc("GET /v1/runtime/nodes/{nodeID}/tasks/{fileName}", protected(s.runtimeTaskDetail))

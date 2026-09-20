@@ -23,6 +23,7 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/uvwt/nexusdock/internal/agentdock"
+	"github.com/uvwt/nexusdock/internal/audit"
 	"github.com/uvwt/nexusdock/internal/auth"
 	"github.com/uvwt/nexusdock/internal/config"
 	"github.com/uvwt/nexusdock/internal/privatenotes"
@@ -90,6 +91,7 @@ type Server struct {
 	agentDockHub         *agentdock.Hub
 	logger               *slog.Logger
 	auth                 *auth.Service
+	auditService         audit.AuditService
 	oauth                *auth.OAuthService
 	oauthRegisterLimiter *fixedWindowLimiter
 	embedding            *recall.EmbeddingService
@@ -190,6 +192,9 @@ func NewServer(cfg config.Config, store *recall.Store, logger *slog.Logger, opti
 	}
 	for _, option := range options {
 		option(server)
+	}
+	if server.db != nil && server.auditService == nil {
+		server.auditService = audit.NewService(server.db)
 	}
 	if server.db != nil && server.auth != nil {
 		server.oauth = auth.NewOAuthService(server.db)
