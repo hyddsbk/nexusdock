@@ -76,4 +76,3 @@ func (c Compatibility) SupportsFeature(feature Feature) bool {
 		return false
 	}
 }
-
