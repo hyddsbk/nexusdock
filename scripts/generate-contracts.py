@@ -860,6 +860,61 @@ def build_schemas() -> dict[str, dict[str, Any]]:
         {"ok": scalar("boolean", "请求是否成功。"), "node": ref("AgentDockNode")},
         ("ok", "node"),
     )
+    schemas["RuntimeWorkspace"] = obj(
+        "Nexus Runtime 的项目执行边界；绑定一个 AgentDock 节点与该项目允许使用的资源。",
+        {
+            "id": scalar("string", "Workspace 稳定短标识。"),
+            "name": scalar("string", "Workspace 显示名称。"),
+            "node_id": scalar("string", "绑定的 AgentDock 节点 ID。"),
+            "project_root": scalar("string", "项目在绑定节点上的根目录。"),
+            "domain": scalar("string", "项目允许的站点域名。"),
+            "allowed_mcp": array("Workspace 允许使用的动态 MCP 服务名。", scalar("string", "动态 MCP 服务名。")),
+            "context_roots": array("Workspace 可加载的上下文根目录。", scalar("string", "节点本地目录。")),
+            "design_authorities": array("设计与内容事实源文件。", scalar("string", "相对或绝对文件路径。")),
+            "route_authority": scalar("string", "站内 URL 权威文件。"),
+            "created_at": TIMESTAMP,
+            "updated_at": TIMESTAMP,
+        },
+        ("id", "name", "node_id", "project_root", "allowed_mcp", "context_roots", "design_authorities", "created_at", "updated_at"),
+    )
+    schemas["RuntimeWorkspaceCreateRequest"] = obj(
+        "创建 Runtime Workspace。",
+        {
+            "id": scalar("string", "2-63 位小写字母、数字或连字符标识。"),
+            "name": scalar("string", "Workspace 显示名称。", minLength=1, maxLength=100),
+            "node_id": scalar("string", "绑定的 AgentDock 节点 ID。"),
+            "project_root": scalar("string", "项目在节点上的根目录。"),
+            "domain": scalar("string", "可选站点域名。"),
+            "allowed_mcp": array("允许的动态 MCP 服务。", scalar("string", "动态 MCP 服务名。")),
+            "context_roots": array("允许的上下文根目录。", scalar("string", "节点本地目录。")),
+            "design_authorities": array("设计与内容事实源文件。", scalar("string", "文件路径。")),
+            "route_authority": scalar("string", "站内 URL 权威文件。"),
+        },
+        ("id", "name", "node_id", "project_root"),
+    )
+    schemas["RuntimeWorkspaceUpdateRequest"] = obj(
+        "更新 Runtime Workspace；未出现的字段保持不变。",
+        {
+            "name": scalar("string", "Workspace 显示名称。", minLength=1, maxLength=100),
+            "node_id": scalar("string", "重新绑定的 AgentDock 节点 ID。"),
+            "project_root": scalar("string", "项目根目录。"),
+            "domain": scalar("string", "站点域名；空字符串表示清除。"),
+            "allowed_mcp": array("允许的动态 MCP 服务。", scalar("string", "动态 MCP 服务名。")),
+            "context_roots": array("允许的上下文根目录。", scalar("string", "节点本地目录。")),
+            "design_authorities": array("设计与内容事实源文件。", scalar("string", "文件路径。")),
+            "route_authority": scalar("string", "站内 URL 权威文件。"),
+        },
+    )
+    schemas["RuntimeWorkspaceResponse"] = obj(
+        "单个 Runtime Workspace 响应。",
+        {"ok": scalar("boolean", "请求是否成功。"), "workspace": ref("RuntimeWorkspace")},
+        ("ok", "workspace"),
+    )
+    schemas["RuntimeWorkspaceListResponse"] = obj(
+        "Runtime Workspace 列表。",
+        {"ok": scalar("boolean", "请求是否成功。"), "items": array("Workspace 条目。", ref("RuntimeWorkspace"))},
+        ("ok", "items"),
+    )
     return schemas
 
 def response(schema: dict[str, Any], description: str = "成功。") -> dict[str, Any]:
@@ -897,6 +952,7 @@ def build_openapi(schemas: dict[str, Any]) -> dict[str, Any]:
         "RecallPath": path_param("path", "URL 编码后的召回相对路径。", uuid=False),
         "EvolutionId": path_param("evolutionID", "Evolution 生命周期记录 ID。", uuid=False),
         "RuntimeNodeId": path_param("nodeID", "Nexus 中登记的 AgentDock 节点 ID。", uuid=False),
+        "RuntimeWorkspaceId": path_param("workspaceID", "Nexus Runtime Workspace ID。", uuid=False),
         "RuntimeTaskId": path_param("taskID", "AgentDock Runtime task ID。", uuid=False),
         "RuntimeSkillSource": path_param("source", "AgentDock Runtime skill source。", uuid=False),
         "RuntimeSkillId": path_param("skillID", "AgentDock Runtime skill ID。", uuid=False),
@@ -1166,6 +1222,15 @@ def build_openapi(schemas: dict[str, Any]) -> dict[str, Any]:
                 request=body(ref("PrivateNoteMaintenanceRequest")),
                 success=ok(ref("PrivateNoteMaintenanceResponse")),
             )
+        },
+        "/v1/runtime/workspaces": {
+            "get": operation("listRuntimeWorkspaces", "列出 Nexus Runtime Workspace", success=ok(ref("RuntimeWorkspaceListResponse"))),
+            "post": operation("createRuntimeWorkspace", "创建 Nexus Runtime Workspace", request=body(ref("RuntimeWorkspaceCreateRequest")), success=ok(ref("RuntimeWorkspaceResponse")), success_code="201"),
+        },
+        "/v1/runtime/workspaces/{workspaceID}": {
+            "get": operation("getRuntimeWorkspace", "读取 Nexus Runtime Workspace", params=[p("RuntimeWorkspaceId")], success=ok(ref("RuntimeWorkspaceResponse"))),
+            "patch": operation("updateRuntimeWorkspace", "更新 Nexus Runtime Workspace", params=[p("RuntimeWorkspaceId")], request=body(ref("RuntimeWorkspaceUpdateRequest")), success=ok(ref("RuntimeWorkspaceResponse"))),
+            "delete": operation("deleteRuntimeWorkspace", "删除 Nexus Runtime Workspace", params=[p("RuntimeWorkspaceId")]),
         },
         "/v1/runtime/nodes": {
             "get": operation("listAgentDockNodes", "列出 Nexus 管理的 AgentDock 节点", success=ok(ref("AgentDockNodeListResponse"))),

@@ -30,6 +30,7 @@ import (
 	"github.com/uvwt/nexusdock/internal/settings"
 	"github.com/uvwt/nexusdock/internal/stage3"
 	"github.com/uvwt/nexusdock/internal/workflow"
+	"github.com/uvwt/nexusdock/internal/workspace"
 )
 
 const maxJSONRequestBytes = 2 << 20
@@ -96,6 +97,7 @@ type Server struct {
 	mcpSettings          *settings.MCPStore
 	mcpToken             *auth.MCPTokenStore
 	workflowRegistry     *workflow.Registry
+	workspaces           *workspace.Store
 	evolutionWorker      *stage3.Worker
 	publishedToolBridge  *agentdock.PublishedToolBridge
 	mcpServer            *mcpsdk.Server
@@ -130,6 +132,10 @@ func WithEmbeddingService(service *recall.EmbeddingService) ServerOption {
 
 func WithRuntimeSettings(store *settings.Store) ServerOption {
 	return func(server *Server) { server.settings = store }
+}
+
+func WithRuntimeWorkspaces(store *workspace.Store) ServerOption {
+	return func(server *Server) { server.workspaces = store }
 }
 
 func WithRuntimeAIConfig(cfg settings.RuntimeAIConfig) ServerOption {
