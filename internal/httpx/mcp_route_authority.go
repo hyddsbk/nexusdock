@@ -8,6 +8,7 @@ import (
 
 	protocol "github.com/uvwt/agentdock-protocol"
 	"github.com/uvwt/nexusdock/internal/agentdock"
+	"github.com/uvwt/nexusdock/internal/capability"
 	"github.com/uvwt/nexusdock/internal/workspace"
 )
 
@@ -19,7 +20,22 @@ func (s *Server) enforceWorkspaceRouteAuthority(ctx context.Context, node agentd
 	if len(candidates) == 0 {
 		return nil
 	}
-	if !containsString(node.Capabilities, "read_file") {
+	authorityReadTool := "read_file"
+	if s.capabilities != nil {
+		resolution, resolveErr := s.capabilities.Resolve(
+			capability.FilesystemRead,
+			agentdock.NewCompatibility(node, nil),
+			true,
+		)
+		if resolveErr != nil {
+			return workspace.PolicyError{
+				Boundary: "route_authority",
+				Resource: item.RouteAuthority,
+				Reason:   "bound AgentDock node has no workspace-safe filesystem.read capability: " + resolveErr.Error(),
+			}
+		}
+		authorityReadTool = resolution.Tool
+	} else if !containsString(node.Capabilities, authorityReadTool) {
 		return workspace.PolicyError{
 			Boundary: "route_authority",
 			Resource: item.RouteAuthority,
@@ -35,7 +51,7 @@ func (s *Server) enforceWorkspaceRouteAuthority(ctx context.Context, node agentd
 		}
 	}
 	result, err := s.agentDockHub.Invoke(ctx, node.ID, protocol.OperationToolCall, map[string]any{
-		"tool":      "read_file",
+		"tool":      authorityReadTool,
 		"arguments": map[string]any{"path": authorityPath},
 	})
 	if err != nil {

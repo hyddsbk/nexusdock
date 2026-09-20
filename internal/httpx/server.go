@@ -25,6 +25,7 @@ import (
 	"github.com/uvwt/nexusdock/internal/agentdock"
 	"github.com/uvwt/nexusdock/internal/audit"
 	"github.com/uvwt/nexusdock/internal/auth"
+	"github.com/uvwt/nexusdock/internal/capability"
 	"github.com/uvwt/nexusdock/internal/config"
 	"github.com/uvwt/nexusdock/internal/privatenotes"
 	"github.com/uvwt/nexusdock/internal/recall"
@@ -101,6 +102,7 @@ type Server struct {
 	mcpToken             *auth.MCPTokenStore
 	workflowRegistry     *workflow.Registry
 	workspaces           *workspace.Store
+	capabilities         *capability.Registry
 	toolGate             *runtimecontrol.Gate
 	evolutionWorker      *stage3.Worker
 	publishedToolBridge  *agentdock.PublishedToolBridge
@@ -144,6 +146,10 @@ func WithRuntimeWorkspaces(store *workspace.Store) ServerOption {
 
 func WithRuntimeToolGate(gate *runtimecontrol.Gate) ServerOption {
 	return func(server *Server) { server.toolGate = gate }
+}
+
+func WithCapabilityRegistry(registry *capability.Registry) ServerOption {
+	return func(server *Server) { server.capabilities = registry }
 }
 
 func WithRuntimeAIConfig(cfg settings.RuntimeAIConfig) ServerOption {
@@ -198,6 +204,9 @@ func NewServer(cfg config.Config, store *recall.Store, logger *slog.Logger, opti
 	}
 	for _, option := range options {
 		option(server)
+	}
+	if server.capabilities == nil {
+		server.capabilities = capability.DefaultRegistry()
 	}
 	if server.toolGate == nil {
 		server.toolGate = runtimecontrol.New(runtimecontrol.Limits{

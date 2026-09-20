@@ -213,7 +213,16 @@ func (s *Server) callNodeTool(ctx context.Context, name string, arguments map[st
 	if err != nil {
 		return s.gatewayToolResult(name, nil, err)
 	}
-	if !containsString(node.Capabilities, name) {
+	compatibility := agentdock.NewCompatibility(node, nil)
+	if s.capabilities != nil {
+		if _, known := s.capabilities.CapabilityForTool(name); known {
+			if _, resolveErr := s.capabilities.ResolveTool(name, compatibility, workspaceID != ""); resolveErr != nil {
+				return s.gatewayToolResult(name, nil, resolveErr)
+			}
+		} else if !compatibility.SupportsCapability(name) {
+			return s.gatewayToolResult(name, nil, fmt.Errorf("AgentDock node %s does not provide tool %s", nodeID, name))
+		}
+	} else if !compatibility.SupportsCapability(name) {
 		return s.gatewayToolResult(name, nil, fmt.Errorf("AgentDock node %s does not provide tool %s", nodeID, name))
 	}
 
