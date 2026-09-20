@@ -51,4 +51,17 @@ func TestRouteAuthorityPathResolvesProjectRelativeFile(t *testing.T) {
 	if _, ok := RouteAuthorityPath(item, "windows"); ok {
 		t.Fatal("parent traversal route authority was accepted")
 	}
+	item.RouteAuthority = `D:\website\ServoCylMotion\website_link.md`
+	if got, ok := RouteAuthorityPath(item, "windows"); !ok || got != "d:/website/servocylmotion/website_link.md" {
+		t.Fatalf("absolute in-root path=%q ok=%v", got, ok)
+	}
+	item.RouteAuthority = `D:\website\ActuLift\website_link.md`
+	if _, ok := RouteAuthorityPath(item, "windows"); ok {
+		t.Fatal("absolute route authority outside workspace roots was accepted")
+	}
+	item.ContextRoots = append(item.ContextRoots, `D:\shared\authority`)
+	item.RouteAuthority = `D:\shared\authority\website_link.md`
+	if got, ok := RouteAuthorityPath(item, "windows"); !ok || got != "d:/shared/authority/website_link.md" {
+		t.Fatalf("absolute context-root path=%q ok=%v", got, ok)
+	}
 }

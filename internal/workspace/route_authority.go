@@ -141,16 +141,24 @@ func RouteAuthorityPath(item Workspace, nodeOS string) (string, bool) {
 	if value == "" {
 		return "", false
 	}
-	if candidate, ok := canonicalPath(value, nodeOS); ok {
-		return candidate, true
+	candidate, absolute := canonicalPath(value, nodeOS)
+	if !absolute {
+		root, ok := canonicalPath(item.ProjectRoot, nodeOS)
+		if !ok {
+			return "", false
+		}
+		value = strings.ReplaceAll(value, "\\", "/")
+		if strings.HasPrefix(value, "../") || value == ".." {
+			return "", false
+		}
+		candidate = pathpkg.Clean(strings.TrimSuffix(root, "/") + "/" + strings.TrimPrefix(value, "/"))
 	}
-	root, ok := canonicalPath(item.ProjectRoot, nodeOS)
-	if !ok {
-		return "", false
+	roots := append([]string{item.ProjectRoot}, item.ContextRoots...)
+	for _, root := range roots {
+		canonicalRoot, ok := canonicalPath(root, nodeOS)
+		if ok && withinPath(candidate, canonicalRoot) {
+			return candidate, true
+		}
 	}
-	value = strings.ReplaceAll(value, "\\", "/")
-	if strings.HasPrefix(value, "../") || value == ".." {
-		return "", false
-	}
-	return pathpkg.Clean(strings.TrimSuffix(root, "/") + "/" + strings.TrimPrefix(value, "/")), true
+	return "", false
 }
