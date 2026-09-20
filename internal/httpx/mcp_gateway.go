@@ -16,6 +16,7 @@ import (
 	"github.com/uvwt/nexusdock/internal/agentdock"
 	"github.com/uvwt/nexusdock/internal/privatenotes"
 	"github.com/uvwt/nexusdock/internal/recall"
+	"github.com/uvwt/nexusdock/internal/runtimecontrol"
 	"github.com/uvwt/nexusdock/internal/workspace"
 )
 
@@ -248,6 +249,17 @@ func (s *Server) callNodeTool(ctx context.Context, name string, arguments map[st
 			return nil, encodeErr
 		}
 		return s.gatewayToolResult(name, details, errors.New(mismatch.Message))
+	}
+
+	if s.toolGate != nil {
+		release, _, gateErr := s.toolGate.Acquire(ctx, runtimecontrol.Request{
+			NodeID: nodeID, WorkspaceID: workspaceID,
+			ResourceKeys: nodeToolResourceKeys(nodeID, workspaceID, name, arguments),
+		})
+		if gateErr != nil {
+			return s.gatewayToolResult(name, nil, fmt.Errorf("Runtime tool queue: %w", gateErr))
+		}
+		defer release()
 	}
 
 	delete(arguments, "node_id")
