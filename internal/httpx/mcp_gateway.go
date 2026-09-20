@@ -229,12 +229,12 @@ func (s *Server) callNodeTool(ctx context.Context, name string, arguments map[st
 	delete(arguments, "node_id")
 	result, err := s.agentDockHub.Invoke(ctx, nodeID, protocol.OperationToolCall, map[string]any{"tool": name, "arguments": arguments})
 	if err == nil {
-		bridgeCapabilities, capabilityErr := s.agentDock.BridgeCapabilities(ctx, nodeID)
-		if capabilityErr != nil {
+		compatibility, compatibilityErr := s.agentDock.Compatibility(ctx, nodeID)
+		if compatibilityErr != nil {
 			if s.logger != nil {
-				s.logger.Warn("读取 AgentDock Bridge 能力失败，保留原始工具结果", "node_id", nodeID, "error", capabilityErr)
+				s.logger.Warn("读取 AgentDock 兼容能力失败，保留原始工具结果", "node_id", nodeID, "error", compatibilityErr)
 			}
-		} else if containsString(bridgeCapabilities, protocol.ArtifactReadCapability) {
+		} else if compatibility.SupportsFeature(agentdock.FeatureArtifactRead) {
 			if decorateErr := s.decorateArtifactToolResult(nodeID, result); decorateErr != nil && s.logger != nil {
 				s.logger.Warn("生成 Nexus Artifact 下载地址失败，保留原始工具结果", "node_id", nodeID, "error", decorateErr)
 			}
