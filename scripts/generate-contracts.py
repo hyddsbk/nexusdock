@@ -1293,6 +1293,7 @@ def build_openapi(schemas: dict[str, Any]) -> dict[str, Any]:
             "delete": operation("deleteAgentDockNode", "删除 AgentDock 节点并撤销 Device Token", params=[p("RuntimeNodeId")]),
         },
         "/v1/runtime/nodes/{nodeID}/overview": {"get": operation("getRuntimeOverview", "读取指定 AgentDock 节点的 Runtime 概览", params=[p("RuntimeNodeId")])},
+        "/v1/runtime/nodes/{nodeID}/status": {"get": operation("getRuntimeNodeStatus", "读取指定 AgentDock 节点的健康、兼容、逻辑能力与并发状态", params=[p("RuntimeNodeId")])},
         "/v1/runtime/nodes/{nodeID}/tasks": {
             "get": operation(
                 "listRuntimeTasks",
