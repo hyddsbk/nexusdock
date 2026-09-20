@@ -16,6 +16,7 @@ import (
 	"github.com/uvwt/nexusdock/internal/agentdock"
 	"github.com/uvwt/nexusdock/internal/privatenotes"
 	"github.com/uvwt/nexusdock/internal/recall"
+	"github.com/uvwt/nexusdock/internal/workspace"
 )
 
 const nexusServerInstructions = "NexusDock 可以连接并统一操作多台 AgentDock 设备。" +
@@ -211,6 +212,27 @@ func (s *Server) callNodeTool(ctx context.Context, name string, arguments map[st
 		return s.gatewayToolResult(name, nil, fmt.Errorf("AgentDock node %s does not provide tool %s", nodeID, name))
 	}
 
+	workspaceID, _ := arguments["workspace_id"].(string)
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID != "" {
+		if s.workspaces == nil {
+			return s.gatewayToolResult(name, nil, errors.New("Runtime Workspace store is unavailable"))
+		}
+		item, workspaceErr := s.workspaces.Get(ctx, workspaceID)
+		if workspaceErr != nil {
+			return s.gatewayToolResult(name, nil, workspaceErr)
+		}
+		if item.NodeID != nodeID {
+			return s.gatewayToolResult(name, nil, workspace.PolicyError{Boundary: "node", Resource: nodeID, Reason: "node is not bound to workspace " + item.ID})
+		}
+		if policyErr := workspace.Enforce(item, node.OS, name, arguments); policyErr != nil {
+			return s.gatewayToolResult(name, nil, policyErr)
+		}
+		if routeErr := s.enforceWorkspaceRouteAuthority(ctx, node, item, name, arguments); routeErr != nil {
+			return s.gatewayToolResult(name, nil, routeErr)
+		}
+	}
+
 	if s.publishedToolBridge == nil {
 		return s.gatewayToolResult(name, nil, fmt.Errorf("Nexus 公开工具契约不存在: %s", name))
 	}
@@ -227,6 +249,7 @@ func (s *Server) callNodeTool(ctx context.Context, name string, arguments map[st
 	}
 
 	delete(arguments, "node_id")
+	delete(arguments, "workspace_id")
 	result, err := s.agentDockHub.Invoke(ctx, nodeID, protocol.OperationToolCall, map[string]any{"tool": name, "arguments": arguments})
 	if err == nil {
 		compatibility, compatibilityErr := s.agentDock.Compatibility(ctx, nodeID)
@@ -270,6 +293,7 @@ func nodeInputSchema(schema map[string]any) map[string]any {
 		cloned["properties"] = properties
 	}
 	properties["node_id"] = map[string]any{"type": "string", "description": "Target AgentDock node ID from agentdock_context."}
+	properties["workspace_id"] = map[string]any{"type": "string", "description": "Optional Nexus Runtime Workspace ID. When provided, Nexus enforces the workspace node, MCP, filesystem and domain boundaries before forwarding the tool call."}
 	required, _ := cloned["required"].([]any)
 	for _, value := range required {
 		if value == "node_id" {
