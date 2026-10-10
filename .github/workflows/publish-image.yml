@@ -10,6 +10,7 @@ on:
   push:
     tags:
       - 'v*'
+      - 'publish-*'
 
 permissions:
   contents: read
@@ -21,13 +22,33 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      TARGET_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.target_ref != '' && inputs.target_ref || github.sha }}
       GOPROXY: https://proxy.golang.org,direct
       GOSUMDB: sum.golang.org
     steps:
+      - name: Resolve target ref
+        id: target
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          DISPATCH_TARGET: ${{ inputs.target_ref }}
+        run: |
+          set -euo pipefail
+          target="$GITHUB_SHA"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && -n "$DISPATCH_TARGET" ]]; then
+            target="$DISPATCH_TARGET"
+          elif [[ "$REF_NAME" == publish-* ]]; then
+            target="${REF_NAME#publish-}"
+            [[ "$target" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "publish-* tags must end with a full 40-character commit SHA" >&2
+              exit 1
+            }
+          fi
+          echo "ref=$target" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TARGET_REF }}
+          ref: ${{ steps.target.outputs.ref }}
 
       - uses: actions/setup-go@v5
         with:
@@ -51,16 +72,35 @@ jobs:
     needs: ci
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      TARGET_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.target_ref != '' && inputs.target_ref || github.sha }}
     outputs:
       digest: ${{ steps.push.outputs.digest }}
       revision: ${{ steps.buildmeta.outputs.revision }}
       dockerhub_enabled: ${{ steps.registries.outputs.dockerhub_enabled }}
     steps:
+      - name: Resolve target ref
+        id: target
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          DISPATCH_TARGET: ${{ inputs.target_ref }}
+        run: |
+          set -euo pipefail
+          target="$GITHUB_SHA"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && -n "$DISPATCH_TARGET" ]]; then
+            target="$DISPATCH_TARGET"
+          elif [[ "$REF_NAME" == publish-* ]]; then
+            target="${REF_NAME#publish-}"
+            [[ "$target" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "publish-* tags must end with a full 40-character commit SHA" >&2
+              exit 1
+            }
+          fi
+          echo "ref=$target" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TARGET_REF }}
+          ref: ${{ steps.target.outputs.ref }}
           fetch-depth: 0
 
       - name: Resolve build version and revision
@@ -131,7 +171,7 @@ jobs:
           tags: |
             type=raw,value=sha-${{ steps.buildmeta.outputs.short_revision }}
             type=raw,value=${{ steps.buildmeta.outputs.semver }},enable=${{ steps.buildmeta.outputs.is_semver == 'true' }}
-            type=raw,value=latest,enable=${{ github.event_name == 'push' && steps.buildmeta.outputs.stable == 'true' }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && steps.buildmeta.outputs.stable == 'true' }}
 
       - name: Build and push image
         id: push
