@@ -8,6 +8,8 @@ on:
         required: false
         type: string
   push:
+    branches:
+      - 'release/publish-ghcr-fallback'
     tags:
       - 'v*'
       - 'publish-*'
@@ -37,12 +39,13 @@ jobs:
           target="$GITHUB_SHA"
           if [[ "$EVENT_NAME" == "workflow_dispatch" && -n "$DISPATCH_TARGET" ]]; then
             target="$DISPATCH_TARGET"
+          elif [[ "$REF_NAME" == "release/publish-ghcr-fallback" ]]; then
+            target="4c2fd39ffb7bec147c2f8f53324418fd396df508"
+          elif [[ "$REF_NAME" =~ ^publish-([0-9a-f]{40})(-.+)?$ ]]; then
+            target="${BASH_REMATCH[1]}"
           elif [[ "$REF_NAME" == publish-* ]]; then
-            target="${REF_NAME#publish-}"
-            [[ "$target" =~ ^[0-9a-f]{40}$ ]] || {
-              echo "publish-* tags must end with a full 40-character commit SHA" >&2
-              exit 1
-            }
+            echo "publish-* tags must start with a full 40-character commit SHA" >&2
+            exit 1
           fi
           echo "ref=$target" >> "$GITHUB_OUTPUT"
 
@@ -89,12 +92,13 @@ jobs:
           target="$GITHUB_SHA"
           if [[ "$EVENT_NAME" == "workflow_dispatch" && -n "$DISPATCH_TARGET" ]]; then
             target="$DISPATCH_TARGET"
+          elif [[ "$REF_NAME" == "release/publish-ghcr-fallback" ]]; then
+            target="4c2fd39ffb7bec147c2f8f53324418fd396df508"
+          elif [[ "$REF_NAME" =~ ^publish-([0-9a-f]{40})(-.+)?$ ]]; then
+            target="${BASH_REMATCH[1]}"
           elif [[ "$REF_NAME" == publish-* ]]; then
-            target="${REF_NAME#publish-}"
-            [[ "$target" =~ ^[0-9a-f]{40}$ ]] || {
-              echo "publish-* tags must end with a full 40-character commit SHA" >&2
-              exit 1
-            }
+            echo "publish-* tags must start with a full 40-character commit SHA" >&2
+            exit 1
           fi
           echo "ref=$target" >> "$GITHUB_OUTPUT"
 
@@ -182,7 +186,10 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.buildmeta.outputs.version }}
+            org.opencontainers.image.revision=${{ steps.buildmeta.outputs.revision }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           build-args: |
             NEXUS_VERSION=${{ steps.buildmeta.outputs.version }}
             NEXUS_REVISION=${{ steps.buildmeta.outputs.revision }}
