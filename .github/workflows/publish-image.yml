@@ -2,6 +2,11 @@ name: Publish container
 
 on:
   workflow_dispatch:
+    inputs:
+      target_ref:
+        description: Commit SHA, branch, or tag to publish. Defaults to the workflow ref.
+        required: false
+        type: string
   push:
     tags:
       - 'v*'
@@ -11,19 +16,18 @@ permissions:
   packages: write
 
 jobs:
-  # 发布门禁：发布镜像必须先通过与 ci.yml 相同的完整验证（make ci + 生成物一致性）。
-  # ci.yml 是单 job 工作流，这里直接内联同样步骤是最简单的复用方式；
-  # 省略 ci.yml 末尾的 docker build 步骤——publish job 本身就会构建多架构镜像。
-  # 触发 tag 推送时 CI 与本门禁会各跑一次完整验证，属于可接受的重复。
   ci:
     name: Full CI gate
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
+      TARGET_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.target_ref != '' && inputs.target_ref || github.sha }}
       GOPROXY: https://proxy.golang.org,direct
       GOSUMDB: sum.golang.org
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_REF }}
 
       - uses: actions/setup-go@v5
         with:
@@ -47,20 +51,57 @@ jobs:
     needs: ci
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      TARGET_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.target_ref != '' && inputs.target_ref || github.sha }}
     outputs:
       digest: ${{ steps.push.outputs.digest }}
+      revision: ${{ steps.buildmeta.outputs.revision }}
+      dockerhub_enabled: ${{ steps.registries.outputs.dockerhub_enabled }}
     steps:
       - uses: actions/checkout@v4
         with:
-          # git describe 需要完整历史与标签，才能得到与 Makefile 构建一致的版本号。
+          ref: ${{ env.TARGET_REF }}
           fetch-depth: 0
 
-      - name: Resolve build version
+      - name: Resolve build version and revision
         id: buildmeta
         shell: bash
         run: |
+          set -euo pipefail
           version="$(git describe --tags --always --dirty)"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          revision="$(git rev-parse HEAD)"
+          short_revision="$(git rev-parse --short=7 HEAD)"
+          semver="${version#v}"
+          is_semver=false
+          stable=false
+          if [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-].*)?$ ]]; then
+            is_semver=true
+            if [[ "$version" != *-* ]]; then
+              stable=true
+            fi
+          fi
+          {
+            echo "version=${version}"
+            echo "revision=${revision}"
+            echo "short_revision=${short_revision}"
+            echo "semver=${semver}"
+            echo "is_semver=${is_semver}"
+            echo "stable=${stable}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve registry availability
+        id: registries
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [[ -n "$DOCKERHUB_USERNAME" && -n "$DOCKERHUB_TOKEN" ]]; then
+            echo "dockerhub_enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "dockerhub_enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Docker Hub credentials are not configured; publishing GHCR only."
+          fi
 
       - uses: docker/setup-qemu-action@v3
 
@@ -74,6 +115,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Login to Docker Hub
+        if: steps.registries.outputs.dockerhub_enabled == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -84,14 +126,12 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ghcr.io/${{ github.repository }}
-            agentdockio/nexusdock
+            name=ghcr.io/${{ github.repository }}
+            name=agentdockio/nexusdock,enable=${{ steps.registries.outputs.dockerhub_enabled == 'true' }}
           tags: |
-            type=sha,prefix=sha-,format=short
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+            type=raw,value=sha-${{ steps.buildmeta.outputs.short_revision }}
+            type=raw,value=${{ steps.buildmeta.outputs.semver }},enable=${{ steps.buildmeta.outputs.is_semver == 'true' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' && steps.buildmeta.outputs.stable == 'true' }}
 
       - name: Build and push image
         id: push
@@ -103,17 +143,18 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # 与 Makefile 构建同源：二进制 buildinfo 与 OCI revision 标签都指向本次推送的提交，
-          # 保证"镜像标签 sha-<短SHA> = 镜像内 revision = 目标提交"三者在发布时即一致。
           build-args: |
             NEXUS_VERSION=${{ steps.buildmeta.outputs.version }}
-            NEXUS_REVISION=${{ github.sha }}
+            NEXUS_REVISION=${{ steps.buildmeta.outputs.revision }}
             NEXUS_SOURCE=https://github.com/${{ github.repository }}
           cache-from: type=gha,scope=nexusdock-runtime
           cache-to: type=gha,mode=max,scope=nexusdock-runtime,ignore-error=true
 
       - name: Report published digest
-        run: echo "digest=${{ steps.push.outputs.digest }}"
+        run: |
+          echo "digest=${{ steps.push.outputs.digest }}"
+          echo "revision=${{ steps.buildmeta.outputs.revision }}"
+          echo "dockerhub_enabled=${{ steps.registries.outputs.dockerhub_enabled }}"
 
   verify:
     name: Verify published container images
@@ -122,6 +163,8 @@ jobs:
     timeout-minutes: 10
     env:
       PUBLISHED_DIGEST: ${{ needs.publish.outputs.digest }}
+      EXPECTED_REVISION: ${{ needs.publish.outputs.revision }}
+      DOCKERHUB_ENABLED: ${{ needs.publish.outputs.dockerhub_enabled }}
     steps:
       - uses: docker/setup-buildx-action@v3
 
@@ -133,14 +176,13 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Login to Docker Hub
+        if: env.DOCKERHUB_ENABLED == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # 永远按本次 build-push 输出的不可变 manifest digest 验证，不能用 latest/semver alias：
-      # workflow_dispatch 可从任意分支触发，而 alias 可能指向另一提交。
-      - name: Verify image revision matches build commit
+      - name: Verify image revision matches target commit
         shell: bash
         run: |
           set -euo pipefail
@@ -148,32 +190,29 @@ jobs:
             echo "invalid published digest: ${PUBLISHED_DIGEST}" >&2
             exit 1
           }
-          images=(
-            "ghcr.io/${GITHUB_REPOSITORY}@${PUBLISHED_DIGEST}"
-            "agentdockio/nexusdock@${PUBLISHED_DIGEST}"
-          )
+          images=("ghcr.io/${GITHUB_REPOSITORY}@${PUBLISHED_DIGEST}")
+          if [[ "$DOCKERHUB_ENABLED" == "true" ]]; then
+            images+=("agentdockio/nexusdock@${PUBLISHED_DIGEST}")
+          fi
           for image in "${images[@]}"; do
             echo "Checking revision of ${image}"
             docker pull "$image"
             revision="$(docker image inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")"
-            if [[ "$revision" != "$GITHUB_SHA" ]]; then
-              echo "OCI revision mismatch: got ${revision}, want ${GITHUB_SHA}" >&2
+            if [[ "$revision" != "$EXPECTED_REVISION" ]]; then
+              echo "OCI revision mismatch: got ${revision}, want ${EXPECTED_REVISION}" >&2
               exit 1
             fi
-            # 构建上下文不含 .git，二进制出现完整 SHA 只能来自 build args 的 ldflags 注入。
-            docker run --rm --entrypoint sh \
-              -e NEXUS_EXPECTED_REVISION="${GITHUB_SHA}" \
-              "$image" -c 'grep -q "$NEXUS_EXPECTED_REVISION" /usr/local/bin/nexusdock'
+            docker run --rm --entrypoint sh -e NEXUS_EXPECTED_REVISION="$EXPECTED_REVISION" "$image" -c 'grep -q "$NEXUS_EXPECTED_REVISION" /usr/local/bin/nexusdock'
           done
 
       - name: Pull and run published images
         shell: bash
         run: |
           set -euo pipefail
-          images=(
-            "ghcr.io/${GITHUB_REPOSITORY}@${PUBLISHED_DIGEST}"
-            "agentdockio/nexusdock@${PUBLISHED_DIGEST}"
-          )
+          images=("ghcr.io/${GITHUB_REPOSITORY}@${PUBLISHED_DIGEST}")
+          if [[ "$DOCKERHUB_ENABLED" == "true" ]]; then
+            images+=("agentdockio/nexusdock@${PUBLISHED_DIGEST}")
+          fi
           for image in "${images[@]}"; do
             echo "Verifying ${image}"
             docker pull "$image"
