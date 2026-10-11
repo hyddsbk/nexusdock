@@ -11,7 +11,7 @@ import (
 	"github.com/uvwt/nexusdock/internal/workflow"
 )
 
-const workflowCompositionNextAction = "Combine these templates for the current user goal: prune irrelevant steps, deduplicate, order the remaining steps, and merge completion conditions. Then call task_manage create with source_template_ids, composed steps, and completion_conditions."
+const workflowCompositionNextAction = "Combine these templates for the current user goal: prune irrelevant steps, deduplicate them, preserve or rebuild valid depends_on edges, and merge completion conditions. Then call task_manage create with source_template_ids, composed steps, and completion_conditions."
 
 // callWorkflowTemplateManage 是集中式 MCP 工具 workflow_template_manage 的入口，
 // 与 REST 端点共用同一个 internal/workflow.Registry。

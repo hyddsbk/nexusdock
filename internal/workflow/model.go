@@ -33,9 +33,10 @@ type MatchRule struct {
 
 // Step 是模板中的一个执行步骤；Phase 用于把步骤归入检查/执行/验证/收尾阶段。
 type Step struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
-	Phase string `json:"phase"`
+	ID        string   `json:"id"`
+	Title     string   `json:"title"`
+	Phase     string   `json:"phase"`
+	DependsOn []string `json:"depends_on,omitempty"`
 }
 
 // Template 是 published 模板文件的完整结构。文件使用严格 JSON 解码，
@@ -97,6 +98,62 @@ func validateTemplate(t Template) error {
 			return fmt.Errorf("duplicate step id %q", step.ID)
 		}
 		seen[step.ID] = true
+	}
+	if err := validateStepDependencies(t.Steps); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateStepDependencies(steps []Step) error {
+	known := make(map[string]struct{}, len(steps))
+	byID := make(map[string]Step, len(steps))
+	for _, step := range steps {
+		known[step.ID] = struct{}{}
+		byID[step.ID] = step
+	}
+	for _, step := range steps {
+		seen := make(map[string]struct{}, len(step.DependsOn))
+		for _, rawDependency := range step.DependsOn {
+			dependency := strings.TrimSpace(rawDependency)
+			if dependency != rawDependency || !ValidToken(dependency) {
+				return fmt.Errorf("step %s has invalid dependency %q", step.ID, rawDependency)
+			}
+			if dependency == step.ID {
+				return fmt.Errorf("step %s cannot depend on itself", step.ID)
+			}
+			if _, exists := known[dependency]; !exists {
+				return fmt.Errorf("step %s depends on unknown step %q", step.ID, dependency)
+			}
+			if _, duplicate := seen[dependency]; duplicate {
+				return fmt.Errorf("step %s has duplicate dependency %q", step.ID, dependency)
+			}
+			seen[dependency] = struct{}{}
+		}
+	}
+
+	state := make(map[string]uint8, len(steps))
+	var visit func(string) error
+	visit = func(id string) error {
+		switch state[id] {
+		case 1:
+			return fmt.Errorf("workflow dependency graph contains a cycle at step %q", id)
+		case 2:
+			return nil
+		}
+		state[id] = 1
+		for _, dependency := range byID[id].DependsOn {
+			if err := visit(dependency); err != nil {
+				return err
+			}
+		}
+		state[id] = 2
+		return nil
+	}
+	for _, step := range steps {
+		if err := visit(step.ID); err != nil {
+			return err
+		}
 	}
 	return nil
 }

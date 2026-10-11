@@ -24,11 +24,12 @@ const (
 // 解析出的 DTO，本包不再接触 AgentDock 上游的动态 map 结构。
 
 type runtimeTaskStep struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	Status    string `json:"status"`
-	Phase     string `json:"phase,omitempty"`
-	UpdatedAt string `json:"updated_at,omitempty"`
+	ID        string   `json:"id"`
+	Title     string   `json:"title"`
+	Status    string   `json:"status"`
+	Phase     string   `json:"phase,omitempty"`
+	DependsOn []string `json:"depends_on,omitempty"`
+	UpdatedAt string   `json:"updated_at,omitempty"`
 }
 
 type runtimeTaskSummary struct {
@@ -43,6 +44,7 @@ type runtimeTaskSummary struct {
 	CurrentStep        *runtimeTaskStep `json:"current_step,omitempty"`
 	CompletedStepCount int              `json:"completed_step_count"`
 	StepCount          int              `json:"step_count"`
+	ReadyStepCount     int              `json:"ready_step_count"`
 	UpdatedAt          string           `json:"updated_at"`
 	CreatedAt          string           `json:"created_at"`
 	TemplateID         string           `json:"template_id,omitempty"`
@@ -314,6 +316,7 @@ func runtimeTaskSummaryView(task agentdock.RuntimeTaskSummary) runtimeTaskSummar
 		CurrentStep:        currentStep,
 		CompletedStepCount: task.CompletedStepCount,
 		StepCount:          task.StepCount,
+		ReadyStepCount:     task.ReadyStepCount,
 		UpdatedAt:          task.UpdatedAt,
 		CreatedAt:          task.CreatedAt,
 		TemplateID:         task.TemplateID,
@@ -327,7 +330,7 @@ func runtimeTaskSummaryView(task agentdock.RuntimeTaskSummary) runtimeTaskSummar
 func runtimeTaskDetailView(detail agentdock.RuntimeTaskDetail) runtimeTaskDetail {
 	steps := make([]runtimeTaskStep, 0, len(detail.Steps))
 	for _, step := range detail.Steps {
-		steps = append(steps, runtimeTaskStep{ID: step.ID, Title: step.Title, Status: step.Status, Phase: step.Phase, UpdatedAt: step.UpdatedAt})
+		steps = append(steps, runtimeTaskStep{ID: step.ID, Title: step.Title, Status: step.Status, Phase: step.Phase, DependsOn: append([]string(nil), step.DependsOn...), UpdatedAt: step.UpdatedAt})
 	}
 	conditions := make([]runtimeTaskCondition, 0, len(detail.Conditions))
 	for _, condition := range detail.Conditions {

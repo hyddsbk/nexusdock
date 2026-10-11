@@ -165,6 +165,58 @@ func TestRegistryFilesRemainPrivate(t *testing.T) {
 	}
 }
 
+func TestPublishPersistsDependencyGraph(t *testing.T) {
+	registry := NewRegistry(t.TempDir())
+	template := testTemplate("development.dag", "1.0.0")
+	template.Steps = []Step{
+		{ID: "inspect", Title: "Inspect", Phase: "check"},
+		{ID: "implement", Title: "Implement", Phase: "execute", DependsOn: []string{"inspect"}},
+		{ID: "verify", Title: "Verify", Phase: "verify", DependsOn: []string{"implement"}},
+	}
+	published, err := registry.Publish(template)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(published.Steps[2].DependsOn) != 1 || published.Steps[2].DependsOn[0] != "implement" {
+		t.Fatalf("published dependency graph = %#v", published.Steps)
+	}
+	loaded, err := registry.Get(template.ID, template.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Steps[1].DependsOn) != 1 || loaded.Steps[1].DependsOn[0] != "inspect" {
+		t.Fatalf("loaded dependency graph = %#v", loaded.Steps)
+	}
+	if loaded.Hash != templateHash(loaded) {
+		t.Fatalf("dependency-bearing template hash is stale: got %q want %q", loaded.Hash, templateHash(loaded))
+	}
+}
+
+func TestPublishRejectsInvalidDependencyGraphs(t *testing.T) {
+	tests := []struct {
+		name  string
+		steps []Step
+		want  string
+	}{
+		{name: "unknown", steps: []Step{{ID: "a", Title: "A", Phase: "execute", DependsOn: []string{"missing"}}}, want: "unknown step"},
+		{name: "self", steps: []Step{{ID: "a", Title: "A", Phase: "execute", DependsOn: []string{"a"}}}, want: "cannot depend on itself"},
+		{name: "duplicate", steps: []Step{{ID: "a", Title: "A", Phase: "execute"}, {ID: "b", Title: "B", Phase: "execute", DependsOn: []string{"a", "a"}}}, want: "duplicate dependency"},
+		{name: "whitespace", steps: []Step{{ID: "a", Title: "A", Phase: "execute"}, {ID: "b", Title: "B", Phase: "execute", DependsOn: []string{" a"}}}, want: "invalid dependency"},
+		{name: "cycle", steps: []Step{{ID: "a", Title: "A", Phase: "execute", DependsOn: []string{"b"}}, {ID: "b", Title: "B", Phase: "execute", DependsOn: []string{"a"}}}, want: "contains a cycle"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry := NewRegistry(t.TempDir())
+			template := testTemplate("development.invalid."+tt.name, "1.0.0")
+			template.Steps = tt.steps
+			_, err := registry.Publish(template)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Publish() error = %v, want substring %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func testTemplate(id, version string) Template {
 	return Template{
 		ID:          id,

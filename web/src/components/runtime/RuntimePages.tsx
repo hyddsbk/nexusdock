@@ -24,9 +24,9 @@ function taskStatusLabel(status: string | undefined, t: TFunction): string {
   }
 }
 
-type TaskStep = { id: string; title: string; status: string };
-type OpsTask = { id: string; title: string; goal: string; status: string; summary?: string; blocker?: string; current_step?: TaskStep; completed_step_count: number; step_count: number; updated_at: string; file_name: string };
-type OpsTaskDetail = OpsTask & { steps?: unknown[] };
+type TaskStep = { id: string; title: string; status: string; phase?: string; depends_on?: string[] };
+type OpsTask = { id: string; title: string; goal: string; status: string; summary?: string; blocker?: string; current_step?: TaskStep; completed_step_count: number; step_count: number; ready_step_count: number; updated_at: string; file_name: string };
+type OpsTaskDetail = OpsTask & { steps?: TaskStep[] };
 type OpsSkill = { id: string; title: string; source: string; path: string; description?: string; updated_at: string; file_count: number; status: string; active_version?: string; versions?: string[]; channels?: Record<string, string>; runtime_state_path?: string; doc_root?: string };
 type OpsSkillFile = { path: string; kind: string; size_bytes: number; updated_at: string };
 type OpsSkillDetail = OpsSkill & { root?: string; skill_doc?: string; files?: OpsSkillFile[]; runtime_state?: Record<string, unknown> };
