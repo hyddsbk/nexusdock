@@ -33,10 +33,12 @@ type MatchRule struct {
 
 // Step 是模板中的一个执行步骤；Phase 用于把步骤归入检查/执行/验证/收尾阶段。
 type Step struct {
-	ID        string   `json:"id"`
-	Title     string   `json:"title"`
-	Phase     string   `json:"phase"`
-	DependsOn []string `json:"depends_on,omitempty"`
+	ID                   string   `json:"id"`
+	Title                string   `json:"title"`
+	Phase                string   `json:"phase"`
+	DependsOn            []string `json:"depends_on,omitempty"`
+	CompletionConditions []string `json:"completion_conditions,omitempty"`
+	ContextRefs          []string `json:"context_refs,omitempty"`
 }
 
 // Template 是 published 模板文件的完整结构。文件使用严格 JSON 解码，
@@ -102,6 +104,9 @@ func validateTemplate(t Template) error {
 	if err := validateStepDependencies(t.Steps); err != nil {
 		return err
 	}
+	if err := validateStepContracts(t.Steps); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -153,6 +158,54 @@ func validateStepDependencies(steps []Step) error {
 	for _, step := range steps {
 		if err := visit(step.ID); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+const maxStepCompletionConditions = 4
+const maxStepContextRefs = 8
+const maxStepCompletionConditionRunes = 240
+const maxStepContextRefRunes = 512
+
+func validateStepContracts(steps []Step) error {
+	hasDAG := false
+	for _, step := range steps {
+		if len(step.DependsOn) > 0 {
+			hasDAG = true
+		}
+		if len(step.CompletionConditions) > maxStepCompletionConditions {
+			return fmt.Errorf("step %s has %d completion conditions; max %d", step.ID, len(step.CompletionConditions), maxStepCompletionConditions)
+		}
+		normalizedConditions := normalizeTexts(step.CompletionConditions)
+		if len(normalizedConditions) != len(step.CompletionConditions) {
+			return fmt.Errorf("step %s completion_conditions must be non-empty and distinct", step.ID)
+		}
+		for _, condition := range step.CompletionConditions {
+			if strings.TrimSpace(condition) != condition || len([]rune(condition)) > maxStepCompletionConditionRunes {
+				return fmt.Errorf("step %s has invalid completion condition", step.ID)
+			}
+		}
+		if len(step.ContextRefs) > maxStepContextRefs {
+			return fmt.Errorf("step %s has %d context refs; max %d", step.ID, len(step.ContextRefs), maxStepContextRefs)
+		}
+		seenRefs := make(map[string]struct{}, len(step.ContextRefs))
+		for _, ref := range step.ContextRefs {
+			trimmed := strings.TrimSpace(ref)
+			if trimmed == "" || trimmed != ref || strings.ContainsAny(ref, "\r\n") || len([]rune(ref)) > maxStepContextRefRunes {
+				return fmt.Errorf("step %s has invalid context ref %q", step.ID, ref)
+			}
+			if _, duplicate := seenRefs[ref]; duplicate {
+				return fmt.Errorf("step %s has duplicate context ref %q", step.ID, ref)
+			}
+			seenRefs[ref] = struct{}{}
+		}
+	}
+	if hasDAG {
+		for _, step := range steps {
+			if len(step.CompletionConditions) == 0 {
+				return fmt.Errorf("DAG step %s requires at least one completion condition", step.ID)
+			}
 		}
 	}
 	return nil

@@ -23,12 +23,14 @@ var (
 // RuntimeTaskStep 是任务的执行步骤。列表项里的 current_step 只携带 id/title/status，
 // 任务详情中的完整步骤会额外带 phase/updated_at，缺失时保持零值。
 type RuntimeTaskStep struct {
-	ID        string   `json:"id"`
-	Title     string   `json:"title"`
-	Status    string   `json:"status"`
-	Phase     string   `json:"phase,omitempty"`
-	DependsOn []string `json:"depends_on,omitempty"`
-	UpdatedAt string   `json:"updated_at,omitempty"`
+	ID                   string   `json:"id"`
+	Title                string   `json:"title"`
+	Status               string   `json:"status"`
+	Phase                string   `json:"phase,omitempty"`
+	DependsOn            []string `json:"depends_on,omitempty"`
+	CompletionConditions []string `json:"completion_conditions,omitempty"`
+	ContextRefs          []string `json:"context_refs,omitempty"`
+	UpdatedAt            string   `json:"updated_at,omitempty"`
 }
 
 // RuntimeTaskSummary 是任务列表项与任务详情共用的摘要视图。
@@ -491,11 +493,19 @@ func (p runtimeParser) parseTaskStep(field string, step map[string]any) (Runtime
 	if err != nil {
 		return RuntimeTaskStep{}, err
 	}
+	completionConditions, err := p.optionalStringArray(field+".completion_conditions", step["completion_conditions"])
+	if err != nil {
+		return RuntimeTaskStep{}, err
+	}
+	contextRefs, err := p.optionalStringArray(field+".context_refs", step["context_refs"])
+	if err != nil {
+		return RuntimeTaskStep{}, err
+	}
 	updatedAt, err := p.optionalString(field+".updated_at", step["updated_at"])
 	if err != nil {
 		return RuntimeTaskStep{}, err
 	}
-	return RuntimeTaskStep{ID: id, Title: title, Status: status, Phase: phase, DependsOn: dependsOn, UpdatedAt: updatedAt}, nil
+	return RuntimeTaskStep{ID: id, Title: title, Status: status, Phase: phase, DependsOn: dependsOn, CompletionConditions: completionConditions, ContextRefs: contextRefs, UpdatedAt: updatedAt}, nil
 }
 
 // parseOptionalTaskStep 解析列表项里的 current_step（只含 id/title/status），缺失或为 null 时返回 nil。

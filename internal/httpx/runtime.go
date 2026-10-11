@@ -24,12 +24,14 @@ const (
 // 解析出的 DTO，本包不再接触 AgentDock 上游的动态 map 结构。
 
 type runtimeTaskStep struct {
-	ID        string   `json:"id"`
-	Title     string   `json:"title"`
-	Status    string   `json:"status"`
-	Phase     string   `json:"phase,omitempty"`
-	DependsOn []string `json:"depends_on,omitempty"`
-	UpdatedAt string   `json:"updated_at,omitempty"`
+	ID                   string   `json:"id"`
+	Title                string   `json:"title"`
+	Status               string   `json:"status"`
+	Phase                string   `json:"phase,omitempty"`
+	DependsOn            []string `json:"depends_on,omitempty"`
+	CompletionConditions []string `json:"completion_conditions,omitempty"`
+	ContextRefs          []string `json:"context_refs,omitempty"`
+	UpdatedAt            string   `json:"updated_at,omitempty"`
 }
 
 type runtimeTaskSummary struct {
@@ -330,7 +332,7 @@ func runtimeTaskSummaryView(task agentdock.RuntimeTaskSummary) runtimeTaskSummar
 func runtimeTaskDetailView(detail agentdock.RuntimeTaskDetail) runtimeTaskDetail {
 	steps := make([]runtimeTaskStep, 0, len(detail.Steps))
 	for _, step := range detail.Steps {
-		steps = append(steps, runtimeTaskStep{ID: step.ID, Title: step.Title, Status: step.Status, Phase: step.Phase, DependsOn: append([]string(nil), step.DependsOn...), UpdatedAt: step.UpdatedAt})
+		steps = append(steps, runtimeTaskStep{ID: step.ID, Title: step.Title, Status: step.Status, Phase: step.Phase, DependsOn: append([]string(nil), step.DependsOn...), CompletionConditions: append([]string(nil), step.CompletionConditions...), ContextRefs: append([]string(nil), step.ContextRefs...), UpdatedAt: step.UpdatedAt})
 	}
 	conditions := make([]runtimeTaskCondition, 0, len(detail.Conditions))
 	for _, condition := range detail.Conditions {

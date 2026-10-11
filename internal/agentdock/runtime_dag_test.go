@@ -27,7 +27,7 @@ func TestParseRuntimeTaskDetailDerivesReadyFrontierFromDependencies(t *testing.T
 	    "steps": [
 	      {"id": "left", "title": "Left", "phase": "execute", "status": "completed"},
 	      {"id": "right", "title": "Right", "phase": "execute", "status": "pending"},
-	      {"id": "join", "title": "Join", "phase": "verify", "status": "pending", "depends_on": ["left", "right"]}
+	      {"id": "join", "title": "Join", "phase": "verify", "status": "pending", "depends_on": ["left", "right"], "completion_conditions": ["Both branches are integrated."], "context_refs": ["artifact://integration/latest"]}
 	    ]
 	  }
 	}`)
@@ -40,6 +40,12 @@ func TestParseRuntimeTaskDetailDerivesReadyFrontierFromDependencies(t *testing.T
 	}
 	if len(detail.Steps[2].DependsOn) != 2 || detail.Steps[2].DependsOn[0] != "left" || detail.Steps[2].DependsOn[1] != "right" {
 		t.Fatalf("dependency edges were not preserved: %#v", detail.Steps)
+	}
+	if len(detail.Steps[2].CompletionConditions) != 1 || detail.Steps[2].CompletionConditions[0] != "Both branches are integrated." {
+		t.Fatalf("step completion conditions were not preserved: %#v", detail.Steps[2])
+	}
+	if len(detail.Steps[2].ContextRefs) != 1 || detail.Steps[2].ContextRefs[0] != "artifact://integration/latest" {
+		t.Fatalf("step context refs were not preserved: %#v", detail.Steps[2])
 	}
 }
 
