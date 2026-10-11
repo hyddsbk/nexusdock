@@ -31,16 +31,30 @@ type runtimeStepQuality struct {
 	DependencyReasons map[string]string `json:"dependency_reasons,omitempty"`
 }
 
+type runtimeDiagnosticEvidence struct {
+	Command      string   `json:"command,omitempty"`
+	Observed     string   `json:"observed,omitempty"`
+	Symptom      string   `json:"symptom,omitempty"`
+	ReproRef     string   `json:"repro_ref,omitempty"`
+	Hypothesis   string   `json:"hypothesis,omitempty"`
+	Falsifier    string   `json:"falsifier,omitempty"`
+	Variable     string   `json:"variable,omitempty"`
+	Method       string   `json:"method,omitempty"`
+	Outcome      string   `json:"outcome,omitempty"`
+	EvidenceRefs []string `json:"evidence_refs,omitempty"`
+}
+
 type runtimeTaskStep struct {
-	ID                   string              `json:"id"`
-	Title                string              `json:"title"`
-	Status               string              `json:"status"`
-	Phase                string              `json:"phase,omitempty"`
-	DependsOn            []string            `json:"depends_on,omitempty"`
-	CompletionConditions []string            `json:"completion_conditions,omitempty"`
-	ContextRefs          []string            `json:"context_refs,omitempty"`
-	Quality              *runtimeStepQuality `json:"quality,omitempty"`
-	UpdatedAt            string              `json:"updated_at,omitempty"`
+	ID                   string                     `json:"id"`
+	Title                string                     `json:"title"`
+	Status               string                     `json:"status"`
+	Phase                string                     `json:"phase,omitempty"`
+	DependsOn            []string                   `json:"depends_on,omitempty"`
+	CompletionConditions []string                   `json:"completion_conditions,omitempty"`
+	ContextRefs          []string                   `json:"context_refs,omitempty"`
+	Quality              *runtimeStepQuality        `json:"quality,omitempty"`
+	Diagnostic           *runtimeDiagnosticEvidence `json:"diagnostic,omitempty"`
+	UpdatedAt            string                     `json:"updated_at,omitempty"`
 }
 
 type runtimeTaskSummary struct {
@@ -318,6 +332,17 @@ func (s *Server) runtimeSkillFile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "node_id": nodeID, "file": runtimeSkillFileContentView(file), "source": "agentdock-runtime-api"})
 }
 
+func runtimeDiagnosticEvidenceView(value *agentdock.RuntimeDiagnosticEvidence) *runtimeDiagnosticEvidence {
+	if value == nil {
+		return nil
+	}
+	return &runtimeDiagnosticEvidence{
+		Command: value.Command, Observed: value.Observed, Symptom: value.Symptom, ReproRef: value.ReproRef,
+		Hypothesis: value.Hypothesis, Falsifier: value.Falsifier, Variable: value.Variable, Method: value.Method,
+		Outcome: value.Outcome, EvidenceRefs: append([]string(nil), value.EvidenceRefs...),
+	}
+}
+
 // runtimeTaskSummaryView 把上游任务 DTO 映射成 UI API 摘要；file_name 是 UI 侧任务文件名，等于任务 ID。
 func runtimeTaskSummaryView(task agentdock.RuntimeTaskSummary) runtimeTaskSummary {
 	var currentStep *runtimeTaskStep
@@ -326,6 +351,7 @@ func runtimeTaskSummaryView(task agentdock.RuntimeTaskSummary) runtimeTaskSummar
 		if task.CurrentStep.Quality != nil {
 			currentStep.Quality = &runtimeStepQuality{Kind: task.CurrentStep.Quality.Kind, Outcome: task.CurrentStep.Quality.Outcome, RefactorGroup: task.CurrentStep.Quality.RefactorGroup, DependencyReasons: task.CurrentStep.Quality.DependencyReasons}
 		}
+		currentStep.Diagnostic = runtimeDiagnosticEvidenceView(task.CurrentStep.Diagnostic)
 	}
 	return runtimeTaskSummary{
 		ID:                 task.ID,
@@ -357,6 +383,7 @@ func runtimeTaskDetailView(detail agentdock.RuntimeTaskDetail) runtimeTaskDetail
 		if step.Quality != nil {
 			item.Quality = &runtimeStepQuality{Kind: step.Quality.Kind, Outcome: step.Quality.Outcome, RefactorGroup: step.Quality.RefactorGroup, DependencyReasons: step.Quality.DependencyReasons}
 		}
+		item.Diagnostic = runtimeDiagnosticEvidenceView(step.Diagnostic)
 		steps = append(steps, item)
 	}
 	conditions := make([]runtimeTaskCondition, 0, len(detail.Conditions))

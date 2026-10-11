@@ -74,16 +74,30 @@ type RuntimeStepQuality struct {
 	DependencyReasons map[string]string `json:"dependency_reasons,omitempty"`
 }
 
+type RuntimeDiagnosticEvidence struct {
+	Command      string   `json:"command,omitempty"`
+	Observed     string   `json:"observed,omitempty"`
+	Symptom      string   `json:"symptom,omitempty"`
+	ReproRef     string   `json:"repro_ref,omitempty"`
+	Hypothesis   string   `json:"hypothesis,omitempty"`
+	Falsifier    string   `json:"falsifier,omitempty"`
+	Variable     string   `json:"variable,omitempty"`
+	Method       string   `json:"method,omitempty"`
+	Outcome      string   `json:"outcome,omitempty"`
+	EvidenceRefs []string `json:"evidence_refs,omitempty"`
+}
+
 type RuntimeTaskStep struct {
-	ID                   string              `json:"id"`
-	Title                string              `json:"title"`
-	Status               string              `json:"status"`
-	Phase                string              `json:"phase,omitempty"`
-	DependsOn            []string            `json:"depends_on,omitempty"`
-	CompletionConditions []string            `json:"completion_conditions,omitempty"`
-	ContextRefs          []string            `json:"context_refs,omitempty"`
-	Quality              *RuntimeStepQuality `json:"quality,omitempty"`
-	UpdatedAt            string              `json:"updated_at,omitempty"`
+	ID                   string                     `json:"id"`
+	Title                string                     `json:"title"`
+	Status               string                     `json:"status"`
+	Phase                string                     `json:"phase,omitempty"`
+	DependsOn            []string                   `json:"depends_on,omitempty"`
+	CompletionConditions []string                   `json:"completion_conditions,omitempty"`
+	ContextRefs          []string                   `json:"context_refs,omitempty"`
+	Quality              *RuntimeStepQuality        `json:"quality,omitempty"`
+	Diagnostic           *RuntimeDiagnosticEvidence `json:"diagnostic,omitempty"`
+	UpdatedAt            string                     `json:"updated_at,omitempty"`
 }
 
 // RuntimeTaskSummary 是任务列表项与任务详情共用的摘要视图。
@@ -744,11 +758,15 @@ func (p runtimeParser) parseTaskStep(field string, step map[string]any) (Runtime
 	if err != nil {
 		return RuntimeTaskStep{}, err
 	}
+	diagnostic, err := p.parseOptionalDiagnosticEvidence(field+".diagnostic", step["diagnostic"])
+	if err != nil {
+		return RuntimeTaskStep{}, err
+	}
 	updatedAt, err := p.optionalString(field+".updated_at", step["updated_at"])
 	if err != nil {
 		return RuntimeTaskStep{}, err
 	}
-	return RuntimeTaskStep{ID: id, Title: title, Status: status, Phase: phase, DependsOn: dependsOn, CompletionConditions: completionConditions, ContextRefs: contextRefs, Quality: quality, UpdatedAt: updatedAt}, nil
+	return RuntimeTaskStep{ID: id, Title: title, Status: status, Phase: phase, DependsOn: dependsOn, CompletionConditions: completionConditions, ContextRefs: contextRefs, Quality: quality, Diagnostic: diagnostic, UpdatedAt: updatedAt}, nil
 }
 
 func (p runtimeParser) parseOptionalStepQuality(field string, value any) (*RuntimeStepQuality, error) {
@@ -786,6 +804,58 @@ func (p runtimeParser) parseOptionalStepQuality(field string, value any) (*Runti
 		reasons = nil
 	}
 	return &RuntimeStepQuality{Kind: kind, Outcome: outcome, RefactorGroup: group, DependencyReasons: reasons}, nil
+}
+
+func (p runtimeParser) parseOptionalDiagnosticEvidence(field string, value any) (*RuntimeDiagnosticEvidence, error) {
+	diagnostic, err := p.object(field, value, true)
+	if err != nil || diagnostic == nil {
+		return nil, err
+	}
+	command, err := p.optionalString(field+".command", diagnostic["command"])
+	if err != nil {
+		return nil, err
+	}
+	observed, err := p.optionalEnum(field+".observed", diagnostic["observed"], []string{"red", "green"})
+	if err != nil {
+		return nil, err
+	}
+	symptom, err := p.optionalString(field+".symptom", diagnostic["symptom"])
+	if err != nil {
+		return nil, err
+	}
+	reproRef, err := p.optionalString(field+".repro_ref", diagnostic["repro_ref"])
+	if err != nil {
+		return nil, err
+	}
+	hypothesis, err := p.optionalString(field+".hypothesis", diagnostic["hypothesis"])
+	if err != nil {
+		return nil, err
+	}
+	falsifier, err := p.optionalString(field+".falsifier", diagnostic["falsifier"])
+	if err != nil {
+		return nil, err
+	}
+	variable, err := p.optionalString(field+".variable", diagnostic["variable"])
+	if err != nil {
+		return nil, err
+	}
+	method, err := p.optionalString(field+".method", diagnostic["method"])
+	if err != nil {
+		return nil, err
+	}
+	outcome, err := p.optionalEnum(field+".outcome", diagnostic["outcome"], []string{"supported", "refuted"})
+	if err != nil {
+		return nil, err
+	}
+	evidenceRefs, err := p.optionalStringArray(field+".evidence_refs", diagnostic["evidence_refs"])
+	if err != nil {
+		return nil, err
+	}
+	return &RuntimeDiagnosticEvidence{
+		Command: command, Observed: observed, Symptom: symptom, ReproRef: reproRef,
+		Hypothesis: hypothesis, Falsifier: falsifier, Variable: variable, Method: method,
+		Outcome: outcome, EvidenceRefs: evidenceRefs,
+	}, nil
 }
 
 // parseOptionalTaskStep 解析列表项里的 current_step（只含 id/title/status），缺失或为 null 时返回 nil。
@@ -829,7 +899,11 @@ func (p runtimeParser) parseOptionalTaskStep(field string, value any) (*RuntimeT
 	if err != nil {
 		return nil, err
 	}
-	return &RuntimeTaskStep{ID: id, Title: title, Status: status, Phase: phase, DependsOn: dependsOn, CompletionConditions: conditions, ContextRefs: refs, Quality: quality}, nil
+	diagnostic, err := p.parseOptionalDiagnosticEvidence(field+".diagnostic", step["diagnostic"])
+	if err != nil {
+		return nil, err
+	}
+	return &RuntimeTaskStep{ID: id, Title: title, Status: status, Phase: phase, DependsOn: dependsOn, CompletionConditions: conditions, ContextRefs: refs, Quality: quality, Diagnostic: diagnostic}, nil
 }
 
 func (p runtimeParser) parseTaskCondition(field string, condition map[string]any) (RuntimeTaskCondition, error) {

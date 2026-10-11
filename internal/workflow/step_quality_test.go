@@ -77,3 +77,40 @@ func TestStepQualityContractValidatesWideRefactorGroup(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func diagnosticWorkflowSteps() []Step {
+	return []Step{
+		{ID: "red-loop", Title: "Establish red feedback loop", Phase: "check", CompletionConditions: []string{"The bug is deterministically red."}, Quality: workflowQuality(StepKindDiagnosticFeedbackLoop, "A fast agent-runnable check fails on the target bug.", "", nil)},
+		{ID: "repro", Title: "Minimize reproduction", Phase: "check", DependsOn: []string{"red-loop"}, CompletionConditions: []string{"The smallest useful reproduction remains red."}, Quality: workflowQuality(StepKindDiagnosticReproduction, "A minimized reproducer isolates the symptom.", "", map[string]string{"red-loop": "The original failure must be observable before minimization."})},
+		{ID: "hypothesis", Title: "State falsifiable hypothesis", Phase: "check", DependsOn: []string{"repro"}, CompletionConditions: []string{"A causal claim and falsifier are explicit."}, Quality: workflowQuality(StepKindDiagnosticHypothesis, "The proposed cause can be disproved by a concrete observation.", "", map[string]string{"repro": "Hypotheses are formed only after the minimal reproduction is established."})},
+		{ID: "validate", Title: "Validate one variable", Phase: "execute", DependsOn: []string{"hypothesis"}, CompletionConditions: []string{"Exactly one named variable is changed and measured."}, Quality: workflowQuality(StepKindDiagnosticValidation, "A single-variable experiment supports or refutes the hypothesis.", "", map[string]string{"hypothesis": "The experiment tests the stated falsifiable hypothesis."})},
+		{ID: "regression", Title: "Run regression", Phase: "verify", DependsOn: []string{"validate"}, CompletionConditions: []string{"The minimal reproduction is green after the supported change."}, Quality: workflowQuality(StepKindDiagnosticRegression, "The exact minimized reproducer is rerun and passes.", "", map[string]string{"validate": "Regression follows the diagnostic experiment."})},
+	}
+}
+
+func TestStepQualityContractValidatesDiagnosticFeedbackLoop(t *testing.T) {
+	steps := diagnosticWorkflowSteps()
+	if err := validateTemplate(qualityTemplate(steps)); err != nil {
+		t.Fatalf("valid diagnostic template rejected: %v", err)
+	}
+
+	partial := steps[:4]
+	if err := validateTemplate(qualityTemplate(partial)); err == nil || !strings.Contains(err.Error(), "requires exactly one feedback_loop") {
+		t.Fatalf("partial diagnostic template err=%v", err)
+	}
+
+	ambiguous := diagnosticWorkflowSteps()
+	secondHypothesis := Step{
+		ID: "hypothesis-b", Title: "Second hypothesis", Phase: "check", DependsOn: []string{"repro"},
+		CompletionConditions: []string{"A second falsifiable causal claim is explicit."},
+		Quality:              workflowQuality(StepKindDiagnosticHypothesis, "A second cause can be falsified.", "", map[string]string{"repro": "It uses the same minimal reproduction."}),
+	}
+	ambiguous = append(ambiguous[:3], append([]Step{secondHypothesis}, ambiguous[3:]...)...)
+	ambiguous[4].DependsOn = []string{"hypothesis", "hypothesis-b"}
+	ambiguous[4].Quality.DependencyReasons = map[string]string{"hypothesis": "Test the first cause.", "hypothesis-b": "Also test the second cause."}
+	ambiguous[5].DependsOn = []string{"validate"}
+	ambiguous[5].Quality.DependencyReasons = map[string]string{"validate": "Regression follows validation."}
+	if err := validateTemplate(qualityTemplate(ambiguous)); err == nil || !strings.Contains(err.Error(), "exactly one falsifiable hypothesis") {
+		t.Fatalf("ambiguous diagnostic template err=%v", err)
+	}
+}

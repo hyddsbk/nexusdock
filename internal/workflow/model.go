@@ -239,16 +239,21 @@ func validateStepContracts(steps []Step) error {
 }
 
 const (
-	StepKindDiscovery            = "discovery"
-	StepKindVerticalSlice        = "vertical_slice"
-	StepKindWideRefactorExpand   = "wide_refactor_expand"
-	StepKindWideRefactorMigrate  = "wide_refactor_migrate"
-	StepKindWideRefactorContract = "wide_refactor_contract"
-	StepKindVerification         = "verification"
-	StepKindRelease              = "release"
-	maxStepQualityOutcomeRunes   = 320
-	maxDependencyReasonRunes     = 240
-	maxRefactorGroupRunes        = 80
+	StepKindDiscovery              = "discovery"
+	StepKindVerticalSlice          = "vertical_slice"
+	StepKindWideRefactorExpand     = "wide_refactor_expand"
+	StepKindWideRefactorMigrate    = "wide_refactor_migrate"
+	StepKindWideRefactorContract   = "wide_refactor_contract"
+	StepKindVerification           = "verification"
+	StepKindRelease                = "release"
+	StepKindDiagnosticFeedbackLoop = "diagnostic_feedback_loop"
+	StepKindDiagnosticReproduction = "diagnostic_reproduction"
+	StepKindDiagnosticHypothesis   = "diagnostic_hypothesis"
+	StepKindDiagnosticValidation   = "diagnostic_validation"
+	StepKindDiagnosticRegression   = "diagnostic_regression"
+	maxStepQualityOutcomeRunes     = 320
+	maxDependencyReasonRunes       = 240
+	maxRefactorGroupRunes          = 80
 )
 
 func validateStepQuality(steps []Step) error {
@@ -310,12 +315,16 @@ func validateStepQuality(steps []Step) error {
 	if err := rejectRedundantDependencyEdges(steps); err != nil {
 		return err
 	}
-	return validateWideRefactorGroups(steps, byID)
+	if err := validateWideRefactorGroups(steps, byID); err != nil {
+		return err
+	}
+	return validateDiagnosticStepFlow(steps, byID)
 }
 
 func validStepKind(kind string) bool {
 	switch kind {
-	case StepKindDiscovery, StepKindVerticalSlice, StepKindWideRefactorExpand, StepKindWideRefactorMigrate, StepKindWideRefactorContract, StepKindVerification, StepKindRelease:
+	case StepKindDiscovery, StepKindVerticalSlice, StepKindWideRefactorExpand, StepKindWideRefactorMigrate, StepKindWideRefactorContract, StepKindVerification, StepKindRelease,
+		StepKindDiagnosticFeedbackLoop, StepKindDiagnosticReproduction, StepKindDiagnosticHypothesis, StepKindDiagnosticValidation, StepKindDiagnosticRegression:
 		return true
 	default:
 		return false

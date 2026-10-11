@@ -69,3 +69,29 @@ func TestParseRuntimeTaskDetailSuppressesReadyFrontierWhenTaskBlocked(t *testing
 		t.Fatalf("blocked task exposed ready frontier: %#v", detail.Summary)
 	}
 }
+
+func TestParseRuntimeTaskDetailPreservesDiagnosticEvidence(t *testing.T) {
+	payload := fixturePayload(t, `{
+	  "task": {
+	    "id": "task_diag", "title": "diagnose", "goal": "prove cause", "status": "active", "phase": "verify",
+	    "updated_at": "2026-10-11T04:00:00Z",
+	    "steps": [{
+	      "id": "regression", "title": "Regression", "phase": "verify", "status": "completed",
+	      "completion_conditions": ["Minimal reproduction is green."],
+	      "quality": {"kind":"diagnostic_regression","outcome":"The minimal reproduction passes.","dependency_reasons":{}},
+	      "diagnostic": {"command":"go test ./pkg -run TestBug/minimal","observed":"green","evidence_refs":["artifact://diag/regression.txt"]}
+	    }]
+	  }
+	}`)
+	detail, err := parseRuntimeTaskDetail("node1", "task_diag", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Steps) != 1 || detail.Steps[0].Diagnostic == nil {
+		t.Fatalf("diagnostic evidence missing: %#v", detail.Steps)
+	}
+	diagnostic := detail.Steps[0].Diagnostic
+	if diagnostic.Command != "go test ./pkg -run TestBug/minimal" || diagnostic.Observed != "green" || len(diagnostic.EvidenceRefs) != 1 {
+		t.Fatalf("diagnostic evidence = %#v", diagnostic)
+	}
+}
