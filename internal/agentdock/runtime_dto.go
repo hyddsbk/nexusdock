@@ -22,15 +22,23 @@ var (
 
 // RuntimeTaskStep 是任务的执行步骤。列表项里的 current_step 只携带 id/title/status，
 // 任务详情中的完整步骤会额外带 phase/updated_at，缺失时保持零值。
+type RuntimeStepQuality struct {
+	Kind              string            `json:"kind"`
+	Outcome           string            `json:"outcome"`
+	RefactorGroup     string            `json:"refactor_group,omitempty"`
+	DependencyReasons map[string]string `json:"dependency_reasons,omitempty"`
+}
+
 type RuntimeTaskStep struct {
-	ID                   string   `json:"id"`
-	Title                string   `json:"title"`
-	Status               string   `json:"status"`
-	Phase                string   `json:"phase,omitempty"`
-	DependsOn            []string `json:"depends_on,omitempty"`
-	CompletionConditions []string `json:"completion_conditions,omitempty"`
-	ContextRefs          []string `json:"context_refs,omitempty"`
-	UpdatedAt            string   `json:"updated_at,omitempty"`
+	ID                   string              `json:"id"`
+	Title                string              `json:"title"`
+	Status               string              `json:"status"`
+	Phase                string              `json:"phase,omitempty"`
+	DependsOn            []string            `json:"depends_on,omitempty"`
+	CompletionConditions []string            `json:"completion_conditions,omitempty"`
+	ContextRefs          []string            `json:"context_refs,omitempty"`
+	Quality              *RuntimeStepQuality `json:"quality,omitempty"`
+	UpdatedAt            string              `json:"updated_at,omitempty"`
 }
 
 // RuntimeTaskSummary 是任务列表项与任务详情共用的摘要视图。
@@ -69,14 +77,22 @@ type RuntimeTaskEvent struct {
 }
 
 // RuntimeTaskFinalReview 对应任务详情里的 final_review；Stage 3 进化依赖 review_revision 与事实清单。
+type RuntimeOutcomeAxis struct {
+	Status   string   `json:"status"`
+	Evidence []string `json:"evidence,omitempty"`
+	Findings []string `json:"findings,omitempty"`
+}
+
 type RuntimeTaskFinalReview struct {
-	Status         string   `json:"status"`
-	Summary        string   `json:"summary,omitempty"`
-	VerifiedFacts  []string `json:"verified_facts,omitempty"`
-	OpenRisks      []string `json:"open_risks,omitempty"`
-	MissingChecks  []string `json:"missing_checks,omitempty"`
-	ReviewRevision string   `json:"review_revision"`
-	ReviewedAt     string   `json:"reviewed_at,omitempty"`
+	IntentSpec        *RuntimeOutcomeAxis `json:"intent_spec,omitempty"`
+	EngineeringPolicy *RuntimeOutcomeAxis `json:"engineering_policy,omitempty"`
+	Status            string              `json:"status"`
+	Summary           string              `json:"summary,omitempty"`
+	VerifiedFacts     []string            `json:"verified_facts,omitempty"`
+	OpenRisks         []string            `json:"open_risks,omitempty"`
+	MissingChecks     []string            `json:"missing_checks,omitempty"`
+	ReviewRevision    string              `json:"review_revision"`
+	ReviewedAt        string              `json:"reviewed_at,omitempty"`
 }
 
 type RuntimeTaskDetail struct {
@@ -501,11 +517,52 @@ func (p runtimeParser) parseTaskStep(field string, step map[string]any) (Runtime
 	if err != nil {
 		return RuntimeTaskStep{}, err
 	}
+	quality, err := p.parseOptionalStepQuality(field+".quality", step["quality"])
+	if err != nil {
+		return RuntimeTaskStep{}, err
+	}
 	updatedAt, err := p.optionalString(field+".updated_at", step["updated_at"])
 	if err != nil {
 		return RuntimeTaskStep{}, err
 	}
-	return RuntimeTaskStep{ID: id, Title: title, Status: status, Phase: phase, DependsOn: dependsOn, CompletionConditions: completionConditions, ContextRefs: contextRefs, UpdatedAt: updatedAt}, nil
+	return RuntimeTaskStep{ID: id, Title: title, Status: status, Phase: phase, DependsOn: dependsOn, CompletionConditions: completionConditions, ContextRefs: contextRefs, Quality: quality, UpdatedAt: updatedAt}, nil
+}
+
+func (p runtimeParser) parseOptionalStepQuality(field string, value any) (*RuntimeStepQuality, error) {
+	quality, err := p.object(field, value, true)
+	if err != nil || quality == nil {
+		return nil, err
+	}
+	kind, err := p.requiredString(field+".kind", quality["kind"])
+	if err != nil {
+		return nil, err
+	}
+	outcome, err := p.requiredString(field+".outcome", quality["outcome"])
+	if err != nil {
+		return nil, err
+	}
+	group, err := p.optionalString(field+".refactor_group", quality["refactor_group"])
+	if err != nil {
+		return nil, err
+	}
+	reasons := map[string]string{}
+	if raw := quality["dependency_reasons"]; raw != nil {
+		obj, err := p.object(field+".dependency_reasons", raw, false)
+		if err != nil {
+			return nil, err
+		}
+		for key, rawValue := range obj {
+			reason, ok := rawValue.(string)
+			if !ok {
+				return nil, p.fail(field+".dependency_reasons."+key, "must be a string")
+			}
+			reasons[key] = reason
+		}
+	}
+	if len(reasons) == 0 {
+		reasons = nil
+	}
+	return &RuntimeStepQuality{Kind: kind, Outcome: outcome, RefactorGroup: group, DependencyReasons: reasons}, nil
 }
 
 // parseOptionalTaskStep 解析列表项里的 current_step（只含 id/title/status），缺失或为 null 时返回 nil。
@@ -529,7 +586,27 @@ func (p runtimeParser) parseOptionalTaskStep(field string, value any) (*RuntimeT
 	if err != nil {
 		return nil, err
 	}
-	return &RuntimeTaskStep{ID: id, Title: title, Status: status}, nil
+	phase, err := p.optionalString(field+".phase", step["phase"])
+	if err != nil {
+		return nil, err
+	}
+	dependsOn, err := p.optionalStringArray(field+".depends_on", step["depends_on"])
+	if err != nil {
+		return nil, err
+	}
+	conditions, err := p.optionalStringArray(field+".completion_conditions", step["completion_conditions"])
+	if err != nil {
+		return nil, err
+	}
+	refs, err := p.optionalStringArray(field+".context_refs", step["context_refs"])
+	if err != nil {
+		return nil, err
+	}
+	quality, err := p.parseOptionalStepQuality(field+".quality", step["quality"])
+	if err != nil {
+		return nil, err
+	}
+	return &RuntimeTaskStep{ID: id, Title: title, Status: status, Phase: phase, DependsOn: dependsOn, CompletionConditions: conditions, ContextRefs: refs, Quality: quality}, nil
 }
 
 func (p runtimeParser) parseTaskCondition(field string, condition map[string]any) (RuntimeTaskCondition, error) {
@@ -600,10 +677,45 @@ func (p runtimeParser) parseOptionalFinalReview(field string, value any) (*Runti
 	if err != nil {
 		return nil, err
 	}
+	intentSpec, err := p.parseOutcomeAxis(field+".intent_spec", review["intent_spec"])
+	if err != nil {
+		return nil, err
+	}
+	engineeringPolicy, err := p.parseOutcomeAxis(field+".engineering_policy", review["engineering_policy"])
+	if err != nil {
+		return nil, err
+	}
 	return &RuntimeTaskFinalReview{
+		IntentSpec: intentSpec, EngineeringPolicy: engineeringPolicy,
 		Status: status, Summary: summary, VerifiedFacts: verifiedFacts, OpenRisks: openRisks,
 		MissingChecks: missingChecks, ReviewRevision: reviewRevision, ReviewedAt: reviewedAt,
 	}, nil
+}
+
+func (p runtimeParser) parseOutcomeAxis(field string, value any) (*RuntimeOutcomeAxis, error) {
+	if value == nil {
+		return nil, nil
+	}
+	axis, err := p.object(field, value, false)
+	if err != nil {
+		return nil, err
+	}
+	status, err := p.requiredString(field+".status", axis["status"])
+	if err != nil {
+		return nil, err
+	}
+	if status != "pass" && status != "failed" {
+		return nil, p.fail(field+".status", "must be pass or failed")
+	}
+	evidence, err := p.optionalStringArray(field+".evidence", axis["evidence"])
+	if err != nil {
+		return nil, err
+	}
+	findings, err := p.optionalStringArray(field+".findings", axis["findings"])
+	if err != nil {
+		return nil, err
+	}
+	return &RuntimeOutcomeAxis{Status: status, Evidence: evidence, Findings: findings}, nil
 }
 
 // parseRuntimeSkillList 解析 GET /internal/runtime/skills 响应。

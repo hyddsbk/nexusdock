@@ -7,6 +7,7 @@ func TestParseRuntimeTaskListPreservesReadyStepCount(t *testing.T) {
 	  "tasks": [{
 	    "id": "task_dag", "status": "active", "review_status": "not_started",
 	    "completed_step_count": 1, "step_count": 4, "ready_step_count": 2,
+	    "current_step": {"id":"slice","title":"Ship slice","status":"pending","completion_conditions":["Behavior passes."],"quality":{"kind":"vertical_slice","outcome":"One behavior works end-to-end."}},
 	    "updated_at": "2026-10-11T03:00:00Z"
 	  }]
 	}`)
@@ -16,6 +17,9 @@ func TestParseRuntimeTaskListPreservesReadyStepCount(t *testing.T) {
 	}
 	if len(tasks) != 1 || tasks[0].ReadyStepCount != 2 {
 		t.Fatalf("ready step count = %#v", tasks)
+	}
+	if tasks[0].CurrentStep == nil || tasks[0].CurrentStep.Quality == nil || tasks[0].CurrentStep.Quality.Kind != "vertical_slice" {
+		t.Fatalf("current step quality = %#v", tasks[0].CurrentStep)
 	}
 }
 
