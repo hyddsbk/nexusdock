@@ -87,6 +87,23 @@ type RuntimeDiagnosticEvidence struct {
 	EvidenceRefs []string `json:"evidence_refs,omitempty"`
 }
 
+type RuntimeExecutionEvidence struct {
+	EvidenceRefs []string `json:"evidence_refs"`
+}
+
+type RuntimeRequirementCoverage struct {
+	RequirementRef string   `json:"requirement_ref"`
+	StepIDs        []string `json:"step_ids"`
+	EvidenceRefs   []string `json:"evidence_refs"`
+}
+
+type RuntimeTraceabilityCoverage struct {
+	RequiredCount int                          `json:"required_count"`
+	CoveredCount  int                          `json:"covered_count"`
+	MissingRefs   []string                     `json:"missing_refs,omitempty"`
+	Items         []RuntimeRequirementCoverage `json:"items"`
+}
+
 type RuntimeTaskHandoff struct {
 	NextStepID      string   `json:"next_step_id,omitempty"`
 	ContextRefs     []string `json:"context_refs,omitempty"`
@@ -105,33 +122,37 @@ type RuntimeTaskStep struct {
 	DependsOn            []string                   `json:"depends_on,omitempty"`
 	CompletionConditions []string                   `json:"completion_conditions,omitempty"`
 	ContextRefs          []string                   `json:"context_refs,omitempty"`
+	RequirementRefs      []string                   `json:"requirement_refs,omitempty"`
 	Quality              *RuntimeStepQuality        `json:"quality,omitempty"`
 	Diagnostic           *RuntimeDiagnosticEvidence `json:"diagnostic,omitempty"`
+	ExecutionEvidence    *RuntimeExecutionEvidence  `json:"execution_evidence,omitempty"`
 	UpdatedAt            string                     `json:"updated_at,omitempty"`
 }
 
 // RuntimeTaskSummary 是任务列表项与任务详情共用的摘要视图。
 // 列表项由上游直接给出计数；详情的计数由解析器按步骤/事件数组推导。
 type RuntimeTaskSummary struct {
-	ID                 string              `json:"id"`
-	Title              string              `json:"title"`
-	Goal               string              `json:"goal"`
-	Status             string              `json:"status"`
-	Phase              string              `json:"phase"`
-	ReviewStatus       string              `json:"review_status"`
-	Summary            string              `json:"summary,omitempty"`
-	Blocker            string              `json:"blocker,omitempty"`
-	CurrentStep        *RuntimeTaskStep    `json:"current_step,omitempty"`
-	Handoff            *RuntimeTaskHandoff `json:"handoff,omitempty"`
-	CompletedStepCount int                 `json:"completed_step_count"`
-	StepCount          int                 `json:"step_count"`
-	ReadyStepCount     int                 `json:"ready_step_count"`
-	UpdatedAt          string              `json:"updated_at"`
-	CreatedAt          string              `json:"created_at,omitempty"`
-	TemplateID         string              `json:"template_id,omitempty"`
-	TemplateVersion    string              `json:"template_version,omitempty"`
-	ConditionCount     int                 `json:"condition_count"`
-	EventCount         int                 `json:"event_count"`
+	ID                  string              `json:"id"`
+	Title               string              `json:"title"`
+	Goal                string              `json:"goal"`
+	Status              string              `json:"status"`
+	Phase               string              `json:"phase"`
+	ReviewStatus        string              `json:"review_status"`
+	Summary             string              `json:"summary,omitempty"`
+	Blocker             string              `json:"blocker,omitempty"`
+	CurrentStep         *RuntimeTaskStep    `json:"current_step,omitempty"`
+	Handoff             *RuntimeTaskHandoff `json:"handoff,omitempty"`
+	RequirementRefs     []string            `json:"requirement_refs,omitempty"`
+	RequirementRefCount int                 `json:"requirement_ref_count,omitempty"`
+	CompletedStepCount  int                 `json:"completed_step_count"`
+	StepCount           int                 `json:"step_count"`
+	ReadyStepCount      int                 `json:"ready_step_count"`
+	UpdatedAt           string              `json:"updated_at"`
+	CreatedAt           string              `json:"created_at,omitempty"`
+	TemplateID          string              `json:"template_id,omitempty"`
+	TemplateVersion     string              `json:"template_version,omitempty"`
+	ConditionCount      int                 `json:"condition_count"`
+	EventCount          int                 `json:"event_count"`
 }
 
 type RuntimeTaskCondition struct {
@@ -154,15 +175,16 @@ type RuntimeOutcomeAxis struct {
 }
 
 type RuntimeTaskFinalReview struct {
-	IntentSpec        *RuntimeOutcomeAxis `json:"intent_spec,omitempty"`
-	EngineeringPolicy *RuntimeOutcomeAxis `json:"engineering_policy,omitempty"`
-	Status            string              `json:"status"`
-	Summary           string              `json:"summary,omitempty"`
-	VerifiedFacts     []string            `json:"verified_facts,omitempty"`
-	OpenRisks         []string            `json:"open_risks,omitempty"`
-	MissingChecks     []string            `json:"missing_checks,omitempty"`
-	ReviewRevision    string              `json:"review_revision"`
-	ReviewedAt        string              `json:"reviewed_at,omitempty"`
+	IntentSpec        *RuntimeOutcomeAxis          `json:"intent_spec,omitempty"`
+	EngineeringPolicy *RuntimeOutcomeAxis          `json:"engineering_policy,omitempty"`
+	Status            string                       `json:"status"`
+	Summary           string                       `json:"summary,omitempty"`
+	VerifiedFacts     []string                     `json:"verified_facts,omitempty"`
+	OpenRisks         []string                     `json:"open_risks,omitempty"`
+	MissingChecks     []string                     `json:"missing_checks,omitempty"`
+	Traceability      *RuntimeTraceabilityCoverage `json:"traceability,omitempty"`
+	ReviewRevision    string                       `json:"review_revision"`
+	ReviewedAt        string                       `json:"reviewed_at,omitempty"`
 }
 
 type RuntimeTaskDetail struct {
@@ -515,6 +537,14 @@ func (p runtimeParser) parseTaskListItem(field string, task map[string]any) (Run
 	if err != nil {
 		return RuntimeTaskSummary{}, err
 	}
+	requirementRefs, err := p.optionalStringArray(field+".requirement_refs", task["requirement_refs"])
+	if err != nil {
+		return RuntimeTaskSummary{}, err
+	}
+	requirementRefCount, err := p.optionalInt(field+".requirement_ref_count", task["requirement_ref_count"])
+	if err != nil {
+		return RuntimeTaskSummary{}, err
+	}
 	title, err := p.optionalString(field+".title", task["title"])
 	if err != nil {
 		return RuntimeTaskSummary{}, err
@@ -534,6 +564,7 @@ func (p runtimeParser) parseTaskListItem(field string, task map[string]any) (Run
 	return RuntimeTaskSummary{
 		ID: id, Title: title, Goal: goal, Status: status, Phase: phase, ReviewStatus: reviewStatus,
 		Summary: summary, Blocker: blocker, CurrentStep: currentStep, Handoff: handoff,
+		RequirementRefs: requirementRefs, RequirementRefCount: requirementRefCount,
 		CompletedStepCount: completedSteps, StepCount: stepCount, ReadyStepCount: readyStepCount,
 		UpdatedAt: updatedAt, CreatedAt: createdAt, EventCount: eventCount,
 	}, nil
@@ -619,6 +650,10 @@ func parseRuntimeTaskDetail(node, taskID string, payload map[string]any) (Runtim
 		return RuntimeTaskDetail{}, err
 	}
 	handoff, err := p.parseOptionalTaskHandoff("task.handoff", task["handoff"])
+	if err != nil {
+		return RuntimeTaskDetail{}, err
+	}
+	requirementRefs, err := p.optionalStringArray("task.requirement_refs", task["requirement_refs"])
 	if err != nil {
 		return RuntimeTaskDetail{}, err
 	}
@@ -722,6 +757,7 @@ func parseRuntimeTaskDetail(node, taskID string, payload map[string]any) (Runtim
 		Summary: RuntimeTaskSummary{
 			ID: id, Title: title, Goal: goal, Status: status, Phase: phase, ReviewStatus: reviewStatus,
 			Summary: summaryText, Blocker: blocker, CurrentStep: current, Handoff: handoff,
+			RequirementRefs: requirementRefs, RequirementRefCount: len(requirementRefs),
 			CompletedStepCount: completedSteps, StepCount: len(steps), ReadyStepCount: readyStepCount,
 			UpdatedAt: updatedAt, CreatedAt: createdAt,
 			TemplateID: templateID, TemplateVersion: templateVersion,
@@ -816,6 +852,10 @@ func (p runtimeParser) parseTaskStep(field string, step map[string]any) (Runtime
 	if err != nil {
 		return RuntimeTaskStep{}, err
 	}
+	requirementRefs, err := p.optionalStringArray(field+".requirement_refs", step["requirement_refs"])
+	if err != nil {
+		return RuntimeTaskStep{}, err
+	}
 	quality, err := p.parseOptionalStepQuality(field+".quality", step["quality"])
 	if err != nil {
 		return RuntimeTaskStep{}, err
@@ -824,11 +864,15 @@ func (p runtimeParser) parseTaskStep(field string, step map[string]any) (Runtime
 	if err != nil {
 		return RuntimeTaskStep{}, err
 	}
+	executionEvidence, err := p.parseOptionalExecutionEvidence(field+".execution_evidence", step["execution_evidence"])
+	if err != nil {
+		return RuntimeTaskStep{}, err
+	}
 	updatedAt, err := p.optionalString(field+".updated_at", step["updated_at"])
 	if err != nil {
 		return RuntimeTaskStep{}, err
 	}
-	return RuntimeTaskStep{ID: id, Title: title, Status: status, Phase: phase, DependsOn: dependsOn, CompletionConditions: completionConditions, ContextRefs: contextRefs, Quality: quality, Diagnostic: diagnostic, UpdatedAt: updatedAt}, nil
+	return RuntimeTaskStep{ID: id, Title: title, Status: status, Phase: phase, DependsOn: dependsOn, CompletionConditions: completionConditions, ContextRefs: contextRefs, RequirementRefs: requirementRefs, Quality: quality, Diagnostic: diagnostic, ExecutionEvidence: executionEvidence, UpdatedAt: updatedAt}, nil
 }
 
 func (p runtimeParser) parseOptionalStepQuality(field string, value any) (*RuntimeStepQuality, error) {
@@ -920,6 +964,18 @@ func (p runtimeParser) parseOptionalDiagnosticEvidence(field string, value any) 
 	}, nil
 }
 
+func (p runtimeParser) parseOptionalExecutionEvidence(field string, value any) (*RuntimeExecutionEvidence, error) {
+	evidence, err := p.object(field, value, true)
+	if err != nil || evidence == nil {
+		return nil, err
+	}
+	refs, err := p.optionalStringArray(field+".evidence_refs", evidence["evidence_refs"])
+	if err != nil {
+		return nil, err
+	}
+	return &RuntimeExecutionEvidence{EvidenceRefs: refs}, nil
+}
+
 // parseOptionalTaskStep 解析列表项里的 current_step（只含 id/title/status），缺失或为 null 时返回 nil。
 func (p runtimeParser) parseOptionalTaskStep(field string, value any) (*RuntimeTaskStep, error) {
 	step, err := p.object(field, value, true)
@@ -957,6 +1013,10 @@ func (p runtimeParser) parseOptionalTaskStep(field string, value any) (*RuntimeT
 	if err != nil {
 		return nil, err
 	}
+	requirementRefs, err := p.optionalStringArray(field+".requirement_refs", step["requirement_refs"])
+	if err != nil {
+		return nil, err
+	}
 	quality, err := p.parseOptionalStepQuality(field+".quality", step["quality"])
 	if err != nil {
 		return nil, err
@@ -965,7 +1025,11 @@ func (p runtimeParser) parseOptionalTaskStep(field string, value any) (*RuntimeT
 	if err != nil {
 		return nil, err
 	}
-	return &RuntimeTaskStep{ID: id, Title: title, Status: status, Phase: phase, DependsOn: dependsOn, CompletionConditions: conditions, ContextRefs: refs, Quality: quality, Diagnostic: diagnostic}, nil
+	executionEvidence, err := p.parseOptionalExecutionEvidence(field+".execution_evidence", step["execution_evidence"])
+	if err != nil {
+		return nil, err
+	}
+	return &RuntimeTaskStep{ID: id, Title: title, Status: status, Phase: phase, DependsOn: dependsOn, CompletionConditions: conditions, ContextRefs: refs, RequirementRefs: requirementRefs, Quality: quality, Diagnostic: diagnostic, ExecutionEvidence: executionEvidence}, nil
 }
 
 func (p runtimeParser) parseTaskCondition(field string, condition map[string]any) (RuntimeTaskCondition, error) {
@@ -1044,10 +1108,62 @@ func (p runtimeParser) parseOptionalFinalReview(field string, value any) (*Runti
 	if err != nil {
 		return nil, err
 	}
+	traceability, err := p.parseOptionalTraceabilityCoverage(field+".traceability", review["traceability"])
+	if err != nil {
+		return nil, err
+	}
 	return &RuntimeTaskFinalReview{IntentSpec: intentAxis, EngineeringPolicy: engineeringAxis,
 		Status: status, Summary: summary, VerifiedFacts: verifiedFacts, OpenRisks: openRisks,
-		MissingChecks: missingChecks, ReviewRevision: reviewRevision, ReviewedAt: reviewedAt,
+		MissingChecks: missingChecks, Traceability: traceability, ReviewRevision: reviewRevision, ReviewedAt: reviewedAt,
 	}, nil
+}
+
+func (p runtimeParser) parseOptionalTraceabilityCoverage(field string, value any) (*RuntimeTraceabilityCoverage, error) {
+	coverage, err := p.object(field, value, true)
+	if err != nil || coverage == nil {
+		return nil, err
+	}
+	requiredCount, err := p.optionalInt(field+".required_count", coverage["required_count"])
+	if err != nil {
+		return nil, err
+	}
+	coveredCount, err := p.optionalInt(field+".covered_count", coverage["covered_count"])
+	if err != nil {
+		return nil, err
+	}
+	missingRefs, err := p.optionalStringArray(field+".missing_refs", coverage["missing_refs"])
+	if err != nil {
+		return nil, err
+	}
+	itemsRaw, err := p.array(field+".items", coverage["items"], true)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]RuntimeRequirementCoverage, 0, len(itemsRaw))
+	for i, raw := range itemsRaw {
+		itemField := fieldIndex(field+".items", i)
+		item, err := p.object(itemField, raw, false)
+		if err != nil {
+			return nil, err
+		}
+		requirementRef, err := p.requiredString(itemField+".requirement_ref", item["requirement_ref"])
+		if err != nil {
+			return nil, err
+		}
+		stepIDs, err := p.optionalStringArray(itemField+".step_ids", item["step_ids"])
+		if err != nil {
+			return nil, err
+		}
+		evidenceRefs, err := p.optionalStringArray(itemField+".evidence_refs", item["evidence_refs"])
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, RuntimeRequirementCoverage{RequirementRef: requirementRef, StepIDs: stepIDs, EvidenceRefs: evidenceRefs})
+	}
+	if requiredCount < 0 || coveredCount < 0 || coveredCount > requiredCount {
+		return nil, p.fail(field, "traceability counts are invalid")
+	}
+	return &RuntimeTraceabilityCoverage{RequiredCount: requiredCount, CoveredCount: coveredCount, MissingRefs: missingRefs, Items: items}, nil
 }
 
 // parseRuntimeSkillList 解析 GET /internal/runtime/skills 响应。

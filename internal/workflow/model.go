@@ -47,6 +47,7 @@ type Step struct {
 	DependsOn            []string     `json:"depends_on,omitempty"`
 	CompletionConditions []string     `json:"completion_conditions,omitempty"`
 	ContextRefs          []string     `json:"context_refs,omitempty"`
+	RequirementRefs      []string     `json:"requirement_refs,omitempty"`
 	Quality              *StepQuality `json:"quality,omitempty"`
 }
 
@@ -72,6 +73,7 @@ type Template struct {
 	Status               Status     `json:"status"`
 	Match                MatchRule  `json:"match,omitempty"`
 	CompletionConditions []string   `json:"completion_conditions"`
+	RequirementRefs      []string   `json:"requirement_refs,omitempty"`
 	Steps                []Step     `json:"steps"`
 	Contract             *Contract  `json:"contract,omitempty"`
 	AllowLongTemplate    bool       `json:"allow_long_template,omitempty"`
@@ -129,6 +131,9 @@ func validateTemplate(t Template) error {
 		return err
 	}
 	if err := validateStepContracts(t.Steps); err != nil {
+		return err
+	}
+	if err := validateTraceabilityContract(t.RequirementRefs, t.Steps); err != nil {
 		return err
 	}
 	if err := validateStepQuality(t.Steps); err != nil {
@@ -446,8 +451,10 @@ func validateTemplateGuardrails(t Template) error {
 	}
 	texts := []string{t.Title, t.Description, t.LongTemplateReason}
 	texts = append(texts, t.CompletionConditions...)
+	texts = append(texts, t.RequirementRefs...)
 	for _, step := range t.Steps {
 		texts = append(texts, step.ID, step.Title)
+		texts = append(texts, step.RequirementRefs...)
 	}
 	if t.Contract != nil {
 		texts = append(texts, t.Contract.Inputs...)

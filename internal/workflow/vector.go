@@ -355,8 +355,10 @@ func vectorText(t Template) string {
 	parts = append(parts, t.Match.Keywords...)
 	parts = append(parts, t.Match.Devices...)
 	parts = append(parts, t.CompletionConditions...)
+	parts = append(parts, t.RequirementRefs...)
 	for _, step := range t.Steps {
 		parts = append(parts, step.ID, step.Title, step.Phase)
+		parts = append(parts, step.RequirementRefs...)
 	}
 	if t.Contract != nil {
 		parts = append(parts, t.Contract.Inputs...)
