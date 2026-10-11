@@ -35,7 +35,7 @@ func TestCallNodeToolKeepsSuccessWhenArtifactDecorationFails(t *testing.T) {
 	hub := agentdock.NewHub(store)
 	connected := make(chan struct{})
 	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := hub.Accept(w, r, node.ID); err != nil {
+		if err := hub.Accept(w, r, node.ID, ""); err != nil {
 			t.Errorf("accept node: %v", err)
 			return
 		}
@@ -105,9 +105,11 @@ func TestCallNodeToolKeepsSuccessWhenArtifactDecorationFails(t *testing.T) {
 		agentDock:    store,
 		agentDockHub: hub,
 		artifacts:    agentdock.NewArtifactService(badDataDir),
-		mcpServer:    mcpsdk.NewServer(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil),
-		mcpResources: make(map[string]struct{}),
-		logger:       slog.Default(),
+		mcp: &mcpGateway{
+			server:    mcpsdk.NewServer(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil),
+			resources: make(map[string]struct{}),
+		},
+		logger: slog.Default(),
 	}
 	server.publishedToolBridge = agentdock.NewPublishedToolBridge(store, slog.Default())
 	server.bindPublishedToolBridge()

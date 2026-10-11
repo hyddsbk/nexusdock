@@ -187,7 +187,7 @@ func newRouteAuthorityGateway(t *testing.T) (*Server, *websocket.Conn, agentdock
 	hub := server.agentDockHub
 	connected := make(chan struct{})
 	websocketServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := hub.Accept(w, r, target.ID); err != nil {
+		if err := hub.Accept(w, r, target.ID, ""); err != nil {
 			t.Errorf("accept route authority node: %v", err)
 			return
 		}

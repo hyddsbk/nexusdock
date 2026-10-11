@@ -3,6 +3,8 @@ package agentdock
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
+	"time"
 )
 
 // 本文件定义 AgentDock Runtime API 在 Nexus 边界内的 DTO 与解析逻辑。
@@ -19,6 +21,49 @@ var (
 	runtimeReviewStatuses = []string{"not_started", "pass", "failed"}
 	runtimeStepStatuses   = []string{"pending", "in_progress", "completed"}
 )
+
+type RuntimeDiagnosticStage struct {
+	Name            string  `json:"name"`
+	StartedOffsetMS float64 `json:"started_offset_ms"`
+	DurationMS      float64 `json:"duration_ms"`
+	Success         bool    `json:"success"`
+}
+
+type RuntimeDiagnosticCall struct {
+	ID            string                   `json:"id"`
+	Tool          string                   `json:"tool"`
+	Source        string                   `json:"source"`
+	TraceID       string                   `json:"trace_id,omitempty"`
+	StartedAt     string                   `json:"started_at"`
+	DurationMS    float64                  `json:"duration_ms"`
+	Success       bool                     `json:"success"`
+	ErrorCode     string                   `json:"error_code,omitempty"`
+	ErrorCategory string                   `json:"error_category,omitempty"`
+	Stages        []RuntimeDiagnosticStage `json:"stages,omitempty"`
+}
+
+type RuntimeOverviewTaskCounts struct {
+	Active          int `json:"active"`
+	Completed       int `json:"completed"`
+	Blocked         int `json:"blocked"`
+	ActiveRecent24H int `json:"active_recent_24h"`
+}
+
+type RuntimeOverviewCount struct {
+	Count int `json:"count"`
+}
+
+type RuntimeOverviewPluginCount struct {
+	Count     int  `json:"count"`
+	Available bool `json:"available"`
+}
+
+type RuntimeOverview struct {
+	Tasks   RuntimeOverviewTaskCounts  `json:"tasks"`
+	Skills  RuntimeOverviewCount       `json:"skills"`
+	Plugins RuntimeOverviewPluginCount `json:"plugins"`
+	MCP     RuntimeOverviewCount       `json:"mcp"`
+}
 
 // RuntimeTaskStep 是任务的执行步骤。列表项里的 current_step 只携带 id/title/status，
 // 任务详情中的完整步骤会额外带 phase/updated_at，缺失时保持零值。
@@ -65,14 +110,22 @@ type RuntimeTaskEvent struct {
 }
 
 // RuntimeTaskFinalReview 对应任务详情里的 final_review；Stage 3 进化依赖 review_revision 与事实清单。
+type RuntimeOutcomeAxis struct {
+	Status   string   `json:"status"`
+	Evidence []string `json:"evidence,omitempty"`
+	Findings []string `json:"findings,omitempty"`
+}
+
 type RuntimeTaskFinalReview struct {
-	Status         string   `json:"status"`
-	Summary        string   `json:"summary,omitempty"`
-	VerifiedFacts  []string `json:"verified_facts,omitempty"`
-	OpenRisks      []string `json:"open_risks,omitempty"`
-	MissingChecks  []string `json:"missing_checks,omitempty"`
-	ReviewRevision string   `json:"review_revision"`
-	ReviewedAt     string   `json:"reviewed_at,omitempty"`
+	IntentSpec        *RuntimeOutcomeAxis `json:"intent_spec,omitempty"`
+	EngineeringPolicy *RuntimeOutcomeAxis `json:"engineering_policy,omitempty"`
+	Status            string              `json:"status"`
+	Summary           string              `json:"summary,omitempty"`
+	VerifiedFacts     []string            `json:"verified_facts,omitempty"`
+	OpenRisks         []string            `json:"open_risks,omitempty"`
+	MissingChecks     []string            `json:"missing_checks,omitempty"`
+	ReviewRevision    string              `json:"review_revision"`
+	ReviewedAt        string              `json:"reviewed_at,omitempty"`
 }
 
 type RuntimeTaskDetail struct {
@@ -83,18 +136,17 @@ type RuntimeTaskDetail struct {
 	FinalReview *RuntimeTaskFinalReview
 }
 
-// RuntimeSkillSummary 是 Skill 列表项。Skill 是安装目录名，作为唯一键必填；
-// Name/Description/FileCount 由较新的 AgentDock 补充，旧节点可能缺失。
+// RuntimeSkillSummary 是当前 managed Skill 内容的列表项。
+// skill_ref 与来源字段直接来自 AgentDock，Nexus 不再维护独立版本或激活态。
 type RuntimeSkillSummary struct {
-	Skill         string   `json:"skill"`
-	Name          string   `json:"name,omitempty"`
-	Description   string   `json:"description,omitempty"`
-	Versions      []string `json:"versions,omitempty"`
-	ActiveVersion string   `json:"active_version,omitempty"`
-	UpdatedAt     string   `json:"updated_at,omitempty"`
-	FileCount     int      `json:"file_count,omitempty"`
-	// Channels 是旧版 AgentDock 的渠道声明字段，当前上游已不再发送；保留以兼容旧节点的 UI 展示。
-	Channels map[string]string `json:"channels,omitempty"`
+	Skill         string `json:"skill"`
+	Name          string `json:"name"`
+	Description   string `json:"description"`
+	SkillRef      string `json:"skill_ref"`
+	SourceType    string `json:"source_type"`
+	PluginName    string `json:"plugin_name,omitempty"`
+	ContentDigest string `json:"content_digest"`
+	FileCount     int    `json:"file_count"`
 }
 
 type RuntimeSkillFile struct {
@@ -106,12 +158,12 @@ type RuntimeSkillFile struct {
 
 type RuntimeSkillDetail struct {
 	Skill         string             `json:"skill"`
-	Name          string             `json:"name,omitempty"`
-	Description   string             `json:"description,omitempty"`
-	Versions      []string           `json:"versions"`
-	ActiveVersion string             `json:"active_version,omitempty"`
-	UpdatedAt     string             `json:"updated_at,omitempty"`
-	Channels      map[string]string  `json:"channels,omitempty"`
+	Name          string             `json:"name"`
+	Description   string             `json:"description"`
+	SkillRef      string             `json:"skill_ref"`
+	SourceType    string             `json:"source_type"`
+	PluginName    string             `json:"plugin_name,omitempty"`
+	ContentDigest string             `json:"content_digest"`
 	Files         []RuntimeSkillFile `json:"files"`
 }
 
@@ -131,6 +183,8 @@ type RuntimeMCPServerSummary struct {
 	Name          string `json:"name"`
 	Description   string `json:"description"`
 	Transport     string `json:"transport"`
+	SourceType    string `json:"source_type,omitempty"`
+	PluginName    string `json:"plugin_name,omitempty"`
 	Enabled       bool   `json:"enabled"`
 	Status        string `json:"status"`
 	ToolCount     int    `json:"tool_count"`
@@ -172,6 +226,183 @@ type RuntimeTaskDeleteResult struct {
 	// DeletedTask 是上游删除确认的回显，UI 只依赖成功状态；保留原始 JSON 透传，
 	// 避免为一条不再被解读的回显维护完整任务 DTO。
 	DeletedTask json.RawMessage
+}
+
+func parseRuntimeOverview(node string, payload map[string]any) (RuntimeOverview, error) {
+	const operation = "GET /internal/runtime/overview"
+	p := runtimeParser{node: node, operation: operation}
+	tasks, err := p.object("tasks", payload["tasks"], false)
+	if err != nil {
+		return RuntimeOverview{}, err
+	}
+	skills, err := p.object("skills", payload["skills"], false)
+	if err != nil {
+		return RuntimeOverview{}, err
+	}
+	plugins, err := p.object("plugins", payload["plugins"], false)
+	if err != nil {
+		return RuntimeOverview{}, err
+	}
+	mcp, err := p.object("mcp", payload["mcp"], false)
+	if err != nil {
+		return RuntimeOverview{}, err
+	}
+
+	readCount := func(field string, value any) (int, error) {
+		if value == nil {
+			return 0, p.fail(field, "缺少必填字段")
+		}
+		count, err := p.optionalInt(field, value)
+		if err != nil {
+			return 0, err
+		}
+		if count < 0 {
+			return 0, p.fail(field, "不得为负数")
+		}
+		return count, nil
+	}
+
+	active, err := readCount("tasks.active", tasks["active"])
+	if err != nil {
+		return RuntimeOverview{}, err
+	}
+	completed, err := readCount("tasks.completed", tasks["completed"])
+	if err != nil {
+		return RuntimeOverview{}, err
+	}
+	blocked, err := readCount("tasks.blocked", tasks["blocked"])
+	if err != nil {
+		return RuntimeOverview{}, err
+	}
+	activeRecent24H, err := readCount("tasks.active_recent_24h", tasks["active_recent_24h"])
+	if err != nil {
+		return RuntimeOverview{}, err
+	}
+	skillCount, err := readCount("skills.count", skills["count"])
+	if err != nil {
+		return RuntimeOverview{}, err
+	}
+	pluginCount, err := readCount("plugins.count", plugins["count"])
+	if err != nil {
+		return RuntimeOverview{}, err
+	}
+	pluginAvailable, err := p.requiredBool("plugins.available", plugins["available"])
+	if err != nil {
+		return RuntimeOverview{}, err
+	}
+	mcpCount, err := readCount("mcp.count", mcp["count"])
+	if err != nil {
+		return RuntimeOverview{}, err
+	}
+	return RuntimeOverview{
+		Tasks: RuntimeOverviewTaskCounts{
+			Active: active, Completed: completed, Blocked: blocked, ActiveRecent24H: activeRecent24H,
+		},
+		Skills:  RuntimeOverviewCount{Count: skillCount},
+		Plugins: RuntimeOverviewPluginCount{Count: pluginCount, Available: pluginAvailable},
+		MCP:     RuntimeOverviewCount{Count: mcpCount},
+	}, nil
+}
+
+func parseRuntimeDiagnostics(node string, payload map[string]any) ([]RuntimeDiagnosticCall, error) {
+	const operation = "GET /internal/runtime/diagnostics"
+	p := runtimeParser{node: node, operation: operation}
+	raw, err := p.array("recent_calls", payload["recent_calls"], false)
+	if err != nil {
+		return nil, err
+	}
+	calls := make([]RuntimeDiagnosticCall, 0, len(raw))
+	for i, item := range raw {
+		field := fieldIndex("recent_calls", i)
+		object, err := p.object(field, item, false)
+		if err != nil {
+			return nil, err
+		}
+		id, err := p.requiredString(field+".id", object["id"])
+		if err != nil {
+			return nil, err
+		}
+		tool, err := p.requiredString(field+".tool", object["tool"])
+		if err != nil {
+			return nil, err
+		}
+		source, err := p.requiredEnum(field+".source", object["source"], []string{"internal", "mcp", "nexus"})
+		if err != nil {
+			return nil, err
+		}
+		traceID, err := p.optionalString(field+".trace_id", object["trace_id"])
+		if err != nil {
+			return nil, err
+		}
+		startedAt, err := p.requiredString(field+".started_at", object["started_at"])
+		if err != nil {
+			return nil, err
+		}
+		if _, err := time.Parse(time.RFC3339Nano, startedAt); err != nil {
+			return nil, p.fail(field+".started_at", "应为 RFC3339 时间")
+		}
+		durationMS, err := p.requiredNumber(field+".duration_ms", object["duration_ms"])
+		if err != nil {
+			return nil, err
+		}
+		if durationMS < 0 {
+			return nil, p.fail(field+".duration_ms", "不得为负数")
+		}
+		success, err := p.requiredBool(field+".success", object["success"])
+		if err != nil {
+			return nil, err
+		}
+		errorCode, err := p.optionalString(field+".error_code", object["error_code"])
+		if err != nil {
+			return nil, err
+		}
+		errorCategory, err := p.optionalString(field+".error_category", object["error_category"])
+		if err != nil {
+			return nil, err
+		}
+		stageRaw, err := p.array(field+".stages", object["stages"], true)
+		if err != nil {
+			return nil, err
+		}
+		stages := make([]RuntimeDiagnosticStage, 0, len(stageRaw))
+		for j, stageValue := range stageRaw {
+			stageField := fieldIndex(field+".stages", j)
+			stageObject, err := p.object(stageField, stageValue, false)
+			if err != nil {
+				return nil, err
+			}
+			// Stage 名称是可扩展的稳定标识。Nexus 只要求非空字符串；
+			// 未知新阶段由 UI 原样展示，避免 AgentDock 先升级时整份诊断契约失效。
+			name, err := p.requiredString(stageField+".name", stageObject["name"])
+			if err != nil {
+				return nil, err
+			}
+			startedOffsetMS, err := p.requiredNumber(stageField+".started_offset_ms", stageObject["started_offset_ms"])
+			if err != nil {
+				return nil, err
+			}
+			duration, err := p.requiredNumber(stageField+".duration_ms", stageObject["duration_ms"])
+			if err != nil {
+				return nil, err
+			}
+			if startedOffsetMS < 0 || duration < 0 {
+				return nil, p.fail(stageField, "阶段偏移与耗时不得为负数")
+			}
+			stageSuccess, err := p.requiredBool(stageField+".success", stageObject["success"])
+			if err != nil {
+				return nil, err
+			}
+			stages = append(stages, RuntimeDiagnosticStage{
+				Name: name, StartedOffsetMS: startedOffsetMS, DurationMS: duration, Success: stageSuccess,
+			})
+		}
+		calls = append(calls, RuntimeDiagnosticCall{
+			ID: id, Tool: tool, Source: source, TraceID: traceID, StartedAt: startedAt,
+			DurationMS: durationMS, Success: success, ErrorCode: errorCode,
+			ErrorCategory: errorCategory, Stages: stages,
+		})
+	}
+	return calls, nil
 }
 
 // parseRuntimeTaskList 解析 GET /internal/runtime/tasks 响应。
@@ -565,14 +796,22 @@ func (p runtimeParser) parseOptionalFinalReview(field string, value any) (*Runti
 	if err != nil {
 		return nil, err
 	}
-	return &RuntimeTaskFinalReview{
+	intentAxis, err := p.parseOutcomeAxis(field+".intent_spec", review["intent_spec"])
+	if err != nil {
+		return nil, err
+	}
+	engineeringAxis, err := p.parseOutcomeAxis(field+".engineering_policy", review["engineering_policy"])
+	if err != nil {
+		return nil, err
+	}
+	return &RuntimeTaskFinalReview{IntentSpec: intentAxis, EngineeringPolicy: engineeringAxis,
 		Status: status, Summary: summary, VerifiedFacts: verifiedFacts, OpenRisks: openRisks,
 		MissingChecks: missingChecks, ReviewRevision: reviewRevision, ReviewedAt: reviewedAt,
 	}, nil
 }
 
 // parseRuntimeSkillList 解析 GET /internal/runtime/skills 响应。
-// skill 字段是安装目录名；id/name 是旧版 AgentDock 的兼容字段名。
+// AgentDock 当前内容模型要求每个列表项都携带精确 skill_ref 与来源身份。
 func parseRuntimeSkillList(node string, payload map[string]any) ([]RuntimeSkillSummary, error) {
 	p := runtimeParser{node: node, operation: "GET /internal/runtime/skills"}
 	raw, err := p.array("skills", payload["skills"], false)
@@ -586,27 +825,43 @@ func parseRuntimeSkillList(node string, payload map[string]any) ([]RuntimeSkillS
 		if err != nil {
 			return nil, err
 		}
-		skill, err := p.skillID(field, object)
+		skill, err := p.requiredString(field+".skill", object["skill"])
 		if err != nil {
 			return nil, err
 		}
-		name, err := p.optionalString(field+".name", object["name"])
+		name, err := p.requiredString(field+".name", object["name"])
 		if err != nil {
 			return nil, err
 		}
-		description, err := p.optionalString(field+".description", object["description"])
+		description, err := p.requiredString(field+".description", object["description"])
 		if err != nil {
 			return nil, err
 		}
-		versions, err := p.optionalStringArray(field+".versions", object["versions"])
+		skillRef, err := p.requiredString(field+".skill_ref", object["skill_ref"])
 		if err != nil {
 			return nil, err
 		}
-		activeVersion, err := p.optionalString(field+".active_version", object["active_version"])
+		sourceType, err := p.requiredString(field+".source_type", object["source_type"])
 		if err != nil {
 			return nil, err
 		}
-		updatedAt, err := p.optionalString(field+".updated_at", object["updated_at"])
+		pluginName, err := p.optionalString(field+".plugin_name", object["plugin_name"])
+		if err != nil {
+			return nil, err
+		}
+		switch sourceType {
+		case "managed":
+			if pluginName != "" {
+				return nil, p.fail(field+".plugin_name", "managed Skill 不应携带 Plugin provenance")
+			}
+		case "plugin":
+			if strings.TrimSpace(pluginName) == "" {
+				return nil, p.fail(field+".plugin_name", "Plugin Skill 必须携带 owning Plugin name")
+			}
+		default:
+			return nil, p.fail(field+".source_type", fmt.Sprintf("不支持的 Skill 来源类型 %q", sourceType))
+		}
+		contentDigest, err := p.requiredString(field+".content_digest", object["content_digest"])
 		if err != nil {
 			return nil, err
 		}
@@ -614,80 +869,69 @@ func parseRuntimeSkillList(node string, payload map[string]any) ([]RuntimeSkillS
 		if err != nil {
 			return nil, err
 		}
-		channels, err := p.optionalStringMap(field+".channels", object["channels"])
-		if err != nil {
-			return nil, err
-		}
 		skills = append(skills, RuntimeSkillSummary{
-			Skill: skill, Name: name, Description: description, Versions: versions,
-			ActiveVersion: activeVersion, UpdatedAt: updatedAt, FileCount: fileCount, Channels: channels,
+			Skill: skill, Name: name, Description: description,
+			SkillRef: skillRef, SourceType: sourceType, PluginName: pluginName,
+			ContentDigest: contentDigest, FileCount: fileCount,
 		})
 	}
 	return skills, nil
 }
 
-// skillID 读取 Skill 安装名；id/name 是旧版 AgentDock 的兼容字段名。
-func (p runtimeParser) skillID(field string, item map[string]any) (string, error) {
-	for _, key := range []string{"skill", "id", "name"} {
-		if value, ok := item[key]; ok && value != nil {
-			if text, ok := value.(string); ok && text != "" {
-				return text, nil
-			}
-			return "", p.fail(field+"."+key, fmt.Sprintf("应为非空字符串，实际为 %T", value))
-		}
-	}
-	return "", p.fail(field+".skill", "缺少必填字段")
-}
-
 // parseRuntimeSkillDetail 解析 GET /internal/runtime/skills/{skillID} 响应。
-// 未激活的 Skill 没有选中版本，document 与 files 缺失属于合法状态。
+// 详情只描述当前 managed Skill 内容，不再解析版本、激活态或渠道历史。
 func parseRuntimeSkillDetail(node, skillID string, payload map[string]any) (RuntimeSkillDetail, error) {
 	operation := "GET /internal/runtime/skills/" + skillID
 	p := runtimeParser{node: node, operation: operation}
 
-	versions, err := p.requiredStringArray("versions", payload["versions"])
+	skill, err := p.requiredString("skill", payload["skill"])
 	if err != nil {
 		return RuntimeSkillDetail{}, err
 	}
-	selection, err := p.object("selection", payload["selection"], true)
+	if skill != skillID {
+		return RuntimeSkillDetail{}, p.fail("skill", fmt.Sprintf("与请求 Skill %q 不一致", skillID))
+	}
+	name, err := p.requiredString("name", payload["name"])
 	if err != nil {
 		return RuntimeSkillDetail{}, err
 	}
-	selectionActive := ""
-	selectionUpdatedAt := ""
-	var channels map[string]string
-	if selection != nil {
-		if selectionActive, err = p.optionalString("selection.active_version", selection["active_version"]); err != nil {
-			return RuntimeSkillDetail{}, err
+	description, err := p.requiredString("description", payload["description"])
+	if err != nil {
+		return RuntimeSkillDetail{}, err
+	}
+	skillRef, err := p.requiredString("skill_ref", payload["skill_ref"])
+	if err != nil {
+		return RuntimeSkillDetail{}, err
+	}
+	sourceType, err := p.requiredString("source_type", payload["source_type"])
+	if err != nil {
+		return RuntimeSkillDetail{}, err
+	}
+	pluginName, err := p.optionalString("plugin_name", payload["plugin_name"])
+	if err != nil {
+		return RuntimeSkillDetail{}, err
+	}
+	switch sourceType {
+	case "managed":
+		if pluginName != "" {
+			return RuntimeSkillDetail{}, p.fail("plugin_name", "managed Skill 不应携带 Plugin provenance")
 		}
-		if selectionUpdatedAt, err = p.optionalString("selection.updated_at", selection["updated_at"]); err != nil {
-			return RuntimeSkillDetail{}, err
+	case "plugin":
+		if strings.TrimSpace(pluginName) == "" {
+			return RuntimeSkillDetail{}, p.fail("plugin_name", "Plugin Skill 必须携带 owning Plugin name")
 		}
-		if channels, err = p.optionalStringMap("selection.channels", selection["channels"]); err != nil {
-			return RuntimeSkillDetail{}, err
-		}
+	default:
+		return RuntimeSkillDetail{}, p.fail("source_type", fmt.Sprintf("不支持的 Skill 来源类型 %q", sourceType))
+	}
+	contentDigest, err := p.requiredString("content_digest", payload["content_digest"])
+	if err != nil {
+		return RuntimeSkillDetail{}, err
+	}
+	if _, err := p.object("document", payload["document"], false); err != nil {
+		return RuntimeSkillDetail{}, err
 	}
 
-	document, err := p.object("document", payload["document"], true)
-	if err != nil {
-		return RuntimeSkillDetail{}, err
-	}
-	name := ""
-	description := ""
-	documentVersion := ""
-	if document != nil {
-		if name, err = p.optionalString("document.name", document["name"]); err != nil {
-			return RuntimeSkillDetail{}, err
-		}
-		if description, err = p.optionalString("document.description", document["description"]); err != nil {
-			return RuntimeSkillDetail{}, err
-		}
-		if documentVersion, err = p.optionalString("document.version", document["version"]); err != nil {
-			return RuntimeSkillDetail{}, err
-		}
-	}
-
-	filesRaw, err := p.array("files", payload["files"], true)
+	filesRaw, err := p.array("files", payload["files"], false)
 	if err != nil {
 		return RuntimeSkillDetail{}, err
 	}
@@ -717,21 +961,10 @@ func parseRuntimeSkillDetail(node, skillID string, payload map[string]any) (Runt
 		files = append(files, RuntimeSkillFile{Path: path, Kind: kind, SizeBytes: sizeBytes, UpdatedAt: updatedAt})
 	}
 
-	// 激活版本按“选中版本 → selection → 文档声明”的顺序回退，与旧解析链保持一致。
-	activeVersion, err := p.optionalString("version", payload["version"])
-	if err != nil {
-		return RuntimeSkillDetail{}, err
-	}
-	if activeVersion == "" {
-		activeVersion = selectionActive
-	}
-	if activeVersion == "" {
-		activeVersion = documentVersion
-	}
-
 	return RuntimeSkillDetail{
-		Skill: skillID, Name: name, Description: description, Versions: versions,
-		ActiveVersion: activeVersion, UpdatedAt: selectionUpdatedAt, Channels: channels, Files: files,
+		Skill: skill, Name: name, Description: description,
+		SkillRef: skillRef, SourceType: sourceType, PluginName: pluginName,
+		ContentDigest: contentDigest, Files: files,
 	}, nil
 }
 
@@ -798,6 +1031,14 @@ func (p runtimeParser) parseRuntimeMCPServerSummary(field string, server map[str
 	if err != nil {
 		return RuntimeMCPServerSummary{}, err
 	}
+	sourceType, err := p.optionalString(field+".source_type", server["source_type"])
+	if err != nil {
+		return RuntimeMCPServerSummary{}, err
+	}
+	pluginName, err := p.optionalString(field+".plugin_name", server["plugin_name"])
+	if err != nil {
+		return RuntimeMCPServerSummary{}, err
+	}
 	lastError, err := p.optionalString(field+".last_error", server["last_error"])
 	if err != nil {
 		return RuntimeMCPServerSummary{}, err
@@ -811,7 +1052,8 @@ func (p runtimeParser) parseRuntimeMCPServerSummary(field string, server map[str
 		return RuntimeMCPServerSummary{}, err
 	}
 	return RuntimeMCPServerSummary{
-		Name: name, Description: description, Transport: transport, Enabled: enabled, Status: status,
+		Name: name, Description: description, Transport: transport, SourceType: sourceType, PluginName: pluginName,
+		Enabled: enabled, Status: status,
 		ToolCount: toolCount, LastError: lastError, LastErrorCode: lastErrorCode, RefreshedAt: refreshedAt,
 	}, nil
 }
@@ -954,4 +1196,40 @@ func parseRuntimeTaskDeleteResult(node, taskID string, payload map[string]any) (
 		deletedTask = encoded
 	}
 	return RuntimeTaskDeleteResult{TaskID: deletedTaskID, DeletedTask: deletedTask}, nil
+}
+
+// RuntimeMCPOAuthCallback 只承载 OAuth Provider 的一次性浏览器回调结果。
+// 这些字段只经 Nexus Bridge 短暂转发，不写入 Nexus 数据库或日志。
+type RuntimeMCPOAuthCallback struct {
+	State            string `json:"state"`
+	Code             string `json:"code,omitempty"`
+	Issuer           string `json:"iss,omitempty"`
+	Error            string `json:"error,omitempty"`
+	ErrorDescription string `json:"error_description,omitempty"`
+}
+
+func (p runtimeParser) parseOutcomeAxis(field string, value any) (*RuntimeOutcomeAxis, error) {
+	if value == nil {
+		return nil, nil
+	}
+	axis, err := p.object(field, value, false)
+	if err != nil {
+		return nil, err
+	}
+	status, err := p.requiredString(field+".status", axis["status"])
+	if err != nil {
+		return nil, err
+	}
+	if status != "pass" && status != "failed" {
+		return nil, p.fail(field+".status", "must be pass or failed")
+	}
+	evidence, err := p.optionalStringArray(field+".evidence", axis["evidence"])
+	if err != nil {
+		return nil, err
+	}
+	findings, err := p.optionalStringArray(field+".findings", axis["findings"])
+	if err != nil {
+		return nil, err
+	}
+	return &RuntimeOutcomeAxis{Status: status, Evidence: evidence, Findings: findings}, nil
 }

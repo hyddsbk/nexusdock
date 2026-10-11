@@ -39,8 +39,8 @@ func canonicalCentralTool(presentation centralToolPresentation) *mcpsdk.Tool {
 }
 
 func canonicalCentralToolWithApps(presentation centralToolPresentation, mcpAppsEnabled bool) *mcpsdk.Tool {
-	input, ok := mcpcontract.InputSchema(presentation.name)
-	if !ok {
+	input, inputOK := mcpcontract.InputSchema(presentation.name)
+	if !inputOK {
 		panic("missing canonical MCP input contract: " + presentation.name)
 	}
 	var output map[string]any

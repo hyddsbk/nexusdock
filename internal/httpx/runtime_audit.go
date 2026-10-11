@@ -5,11 +5,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/uvwt/nexusdock/internal/audit"
 )
 
-func (s *Server) registerRuntimeAuditRoutes(mux *http.ServeMux, protected func(http.HandlerFunc) http.HandlerFunc) {
-	mux.HandleFunc("GET /v1/runtime/audit", protected(s.runtimeAuditList))
+func (s *Server) registerRuntimeAuditRoutes(r chi.Router) {
+	r.Get("/v1/runtime/audit", s.runtimeAuditList)
 }
 
 func (s *Server) runtimeAuditList(w http.ResponseWriter, r *http.Request) {

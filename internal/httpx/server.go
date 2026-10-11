@@ -21,12 +21,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/uvwt/nexusdock/internal/agentdock"
 	"github.com/uvwt/nexusdock/internal/audit"
 	"github.com/uvwt/nexusdock/internal/auth"
 	"github.com/uvwt/nexusdock/internal/capability"
 	"github.com/uvwt/nexusdock/internal/config"
+	"github.com/uvwt/nexusdock/internal/observability"
 	"github.com/uvwt/nexusdock/internal/privatenotes"
 	"github.com/uvwt/nexusdock/internal/recall"
 	"github.com/uvwt/nexusdock/internal/runtimecontrol"
@@ -82,41 +82,37 @@ func (w *trackedResponseWriter) Flush() {
 }
 
 type Server struct {
-	mu                   sync.RWMutex
-	cfg                  config.Config
-	aiCfg                settings.RuntimeAIConfig
-	mcpAppsEnabledState  bool
-	db                   *sql.DB
-	store                *recall.Store
-	privateNotes         *privatenotes.Store
-	agentDock            *agentdock.Store
-	agentDockHub         *agentdock.Hub
-	logger               *slog.Logger
-	auth                 *auth.Service
-	auditService         audit.AuditService
-	oauth                *auth.OAuthService
-	oauthRegisterLimiter *fixedWindowLimiter
-	embedding            *recall.EmbeddingService
-	settings             *settings.Store
-	mcpSettings          *settings.MCPStore
-	mcpToken             *auth.MCPTokenStore
-	workflowRegistry     *workflow.Registry
-	workspaces           *workspace.Store
-	capabilities         *capability.Registry
-	toolGate             *runtimecontrol.Gate
-	evolutionWorker      *stage3.Worker
-	publishedToolBridge  *agentdock.PublishedToolBridge
-	mcpServer            *mcpsdk.Server
-	mcpHandler           http.Handler
-	mcpResourcesMu       sync.RWMutex
-	mcpResources         map[string]struct{}
-	artifacts            *agentdock.ArtifactService
+	mcpAppsMu           sync.RWMutex
+	cfg                 config.Config
+	runtimeAI           runtimeAIState
+	access              accessControl
+	mcpAppsEnabledState bool
+	tracing             *observability.Tracing
+	db                  *sql.DB
+	store               *recall.Store
+	privateNotes        *privatenotes.Store
+	agentDock           *agentdock.Store
+	agentDockHub        *agentdock.Hub
+	logger              *slog.Logger
+	auditService        audit.AuditService
+	mcpSettings         *settings.MCPStore
+	workflowRegistry    *workflow.Registry
+	workspaces          *workspace.Store
+	capabilities        *capability.Registry
+	toolGate            *runtimecontrol.Gate
+	publishedToolBridge *agentdock.PublishedToolBridge
+	mcp                 *mcpGateway
+	artifacts           *agentdock.ArtifactService
 }
 
 type ServerOption func(*Server)
 
 func WithSystemDatabase(db *sql.DB) ServerOption {
 	return func(server *Server) { server.db = db }
+}
+
+func WithTracing(tracing *observability.Tracing) ServerOption {
+	return func(server *Server) { server.tracing = tracing }
 }
 
 // WithAgentDockNodes 注入组合根创建的节点存储与连接 Hub；
@@ -129,15 +125,15 @@ func WithAgentDockNodes(store *agentdock.Store, hub *agentdock.Hub) ServerOption
 }
 
 func WithWebAuthentication(authService *auth.Service) ServerOption {
-	return func(server *Server) { server.auth = authService }
+	return func(server *Server) { server.access.auth = authService }
 }
 
 func WithEmbeddingService(service *recall.EmbeddingService) ServerOption {
-	return func(server *Server) { server.embedding = service }
+	return func(server *Server) { server.runtimeAI.embedding = service }
 }
 
 func WithRuntimeSettings(store *settings.Store) ServerOption {
-	return func(server *Server) { server.settings = store }
+	return func(server *Server) { server.runtimeAI.settingsStore = store }
 }
 
 func WithRuntimeWorkspaces(store *workspace.Store) ServerOption {
@@ -153,7 +149,7 @@ func WithCapabilityRegistry(registry *capability.Registry) ServerOption {
 }
 
 func WithRuntimeAIConfig(cfg settings.RuntimeAIConfig) ServerOption {
-	return func(server *Server) { server.aiCfg = cfg }
+	return func(server *Server) { server.runtimeAI.config = cfg }
 }
 
 func WithMCPSettings(store *settings.MCPStore) ServerOption {
@@ -169,7 +165,7 @@ func WithPrivateNotes(store *privatenotes.Store) ServerOption {
 }
 
 func WithMCPTokenStore(store *auth.MCPTokenStore) ServerOption {
-	return func(server *Server) { server.mcpToken = store }
+	return func(server *Server) { server.access.mcpToken = store }
 }
 
 // WithWorkflowRegistry 注入组合根创建的 Workflow 模板注册表；
@@ -181,7 +177,7 @@ func WithWorkflowRegistry(registry *workflow.Registry) ServerOption {
 // WithEvolutionWorker 注入组合根拥有的 Stage 3 进化 Worker；
 // HTTP 层只在运行期 AI 设置保存成功后唤醒它，不参与调度与执行。
 func WithEvolutionWorker(worker *stage3.Worker) ServerOption {
-	return func(server *Server) { server.evolutionWorker = worker }
+	return func(server *Server) { server.runtimeAI.evolutionWorker = worker }
 }
 
 // WithPublishedToolBridge 注入组合根创建的节点工具契约 Bridge；
@@ -198,9 +194,8 @@ func WithArtifactService(service *agentdock.ArtifactService) ServerOption {
 
 func NewServer(cfg config.Config, store *recall.Store, logger *slog.Logger, options ...ServerOption) *Server {
 	server := &Server{
-		cfg: cfg, aiCfg: settings.DefaultRuntimeAIConfig(), mcpAppsEnabledState: settings.DefaultMCPAppsEnabled,
+		cfg: cfg, runtimeAI: newRuntimeAIState(store), access: newAccessControl(cfg.TrustedProxies, logger), mcpAppsEnabledState: settings.DefaultMCPAppsEnabled,
 		store: store, logger: logger,
-		mcpResources: make(map[string]struct{}),
 	}
 	for _, option := range options {
 		option(server)
@@ -218,67 +213,12 @@ func NewServer(cfg config.Config, store *recall.Store, logger *slog.Logger, opti
 	if server.db != nil && server.auditService == nil {
 		server.auditService = audit.NewService(server.db)
 	}
-	if server.db != nil && server.auth != nil {
-		server.oauth = auth.NewOAuthService(server.db)
-		server.oauthRegisterLimiter = newFixedWindowLimiter(30, time.Minute)
+	if server.db != nil && server.access.auth != nil {
+		server.access.oauth = auth.NewOAuthService(server.db)
+		server.access.oauthRegisterLimiter = newFixedWindowLimiter(30, time.Minute)
 	}
 	server.initializeMCPGateway()
 	return server
-}
-
-func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-	protected := func(next http.HandlerFunc) http.HandlerFunc { return s.withAPIAccess(next) }
-	deviceProtected := func(next http.HandlerFunc) http.HandlerFunc { return s.withDeviceOrAPIAccess(next) }
-	uiProtected := func(next http.HandlerFunc) http.HandlerFunc { return s.withUIAccess(next) }
-	mux.HandleFunc("GET /", uiProtected(s.uiIndex))
-	mux.HandleFunc("GET /ui/", uiProtected(s.uiIndex))
-	mux.HandleFunc("GET /health", s.health)
-	mux.HandleFunc("GET /ready", s.ready)
-	mux.HandleFunc("GET /artifacts/public/{nodeID}/{artifactID}/{filename}", s.servePublicArtifact)
-	mux.HandleFunc("HEAD /artifacts/public/{nodeID}/{artifactID}/{filename}", s.servePublicArtifact)
-	if s.mcpHandler != nil {
-		gateway := s.withMCPAccess(s.mcpHandler.ServeHTTP)
-		mux.HandleFunc("GET /mcp", gateway)
-		mux.HandleFunc("POST /mcp", gateway)
-		mux.HandleFunc("DELETE /mcp", gateway)
-	}
-	s.registerOAuthRoutes(mux)
-	mux.HandleFunc("GET /v1/system/status", protected(s.systemStatus))
-	mux.HandleFunc("GET /v1/settings/ai", protected(s.getRuntimeAISettings))
-	mux.HandleFunc("GET /v1/settings/mcp", protected(s.getMCPSettings))
-	mux.HandleFunc("PUT /v1/settings/mcp", protected(s.updateMCPSettings))
-	mux.HandleFunc("GET /v1/settings/mcp-token", protected(s.getMCPAccessToken))
-	mux.HandleFunc("POST /v1/settings/mcp-token/reset", protected(s.resetMCPAccessToken))
-	mux.HandleFunc("PUT /v1/settings/ai", protected(s.updateRuntimeAISettings))
-	mux.HandleFunc("POST /v1/settings/ai/test/stage3", protected(s.testStage3Connection))
-	mux.HandleFunc("POST /v1/settings/ai/test/embedding", protected(s.testEmbeddingConnection))
-	s.registerRuntimeRoutes(mux, protected)
-	s.registerEvolutionLifecycleRoutes(mux, protected)
-	s.registerWorkflowTemplateRoutes(mux, deviceProtected)
-	if s.privateNotes != nil {
-		s.registerPrivateNoteRoutes(mux, deviceProtected)
-	}
-	s.registerWebAuthRoutes(mux)
-	mux.HandleFunc("GET /v1/recall", deviceProtected(s.listMemories))
-	mux.HandleFunc("POST /v1/recall", deviceProtected(s.writeRecall))
-	mux.HandleFunc("POST /v1/recall/preview", deviceProtected(s.previewRecall))
-	mux.HandleFunc("POST /v1/recall/move", deviceProtected(s.moveRecall))
-	mux.HandleFunc("POST /v1/recall/search", deviceProtected(s.searchMemories))
-	mux.HandleFunc("POST /v1/recall/context-index", deviceProtected(s.contextIndexMemories))
-	mux.HandleFunc("GET /v1/recall/cards", deviceProtected(s.listCards))
-	mux.HandleFunc("POST /v1/recall/cards", deviceProtected(s.writeCard))
-	mux.HandleFunc("POST /v1/recall/cards/capture", deviceProtected(s.captureCard))
-	mux.HandleFunc("POST /v1/recall/cards/search", deviceProtected(s.searchCards))
-	mux.HandleFunc("GET /v1/embeddings/status", deviceProtected(s.embeddingStatus))
-	mux.HandleFunc("POST /v1/embeddings/reindex", deviceProtected(s.reindexEmbeddings))
-	mux.HandleFunc("POST /v1/embeddings/search", deviceProtected(s.searchEmbeddings))
-	mux.HandleFunc("GET /v1/recall/{path...}", deviceProtected(s.readRecall))
-	mux.HandleFunc("PATCH /v1/recall/{path...}", deviceProtected(s.patchRecall))
-	mux.HandleFunc("DELETE /v1/recall/{path...}", deviceProtected(s.deleteRecall))
-	mux.HandleFunc("GET /v1/", http.NotFound)
-	mux.HandleFunc("GET /api/", http.NotFound)
-	return s.requestBoundary(s.securityHeaders(mux))
 }
 
 func (s *Server) requestBoundary(next http.Handler) http.Handler {
@@ -352,7 +292,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		if strings.HasPrefix(r.URL.Path, "/v1/") || strings.HasPrefix(r.URL.Path, "/internal/") || r.URL.Path == "/login" || r.URL.Path == "/change-password" {
 			headers.Set("Cache-Control", "no-store")
 		}
-		if r.TLS != nil || s.isTrustedProxy(r) && strings.EqualFold(lastForwardedValue(r.Header.Get("X-Forwarded-Proto")), "https") {
+		if r.TLS != nil || s.access.isTrustedProxy(r) && strings.EqualFold(lastForwardedValue(r.Header.Get("X-Forwarded-Proto")), "https") {
 			headers.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		}
 		next.ServeHTTP(w, r)
@@ -516,14 +456,6 @@ func (s *Server) deleteRecall(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": path})
 }
 
-func (s *Server) searchRecall(ctx context.Context, options recall.SearchOptions) ([]recall.SearchResult, error) {
-	embedding := s.currentEmbedding()
-	if embedding == nil {
-		return s.store.SearchWithOptions(options)
-	}
-	return embedding.HybridSearch(ctx, options)
-}
-
 func (s *Server) searchMemories(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Query         string `json:"query"`
@@ -534,7 +466,7 @@ func (s *Server) searchMemories(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	results, err := s.searchRecall(r.Context(), recall.SearchOptions{
+	results, err := s.executeRecallSearch(r.Context(), recall.SearchOptions{
 		Query: req.Query, Prefix: req.Prefix, ExcludePrefix: req.ExcludePrefix, MaxResults: req.MaxResults,
 	})
 	if err != nil {
@@ -610,7 +542,7 @@ func (s *Server) searchCards(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	results, err := s.searchRecall(r.Context(), recall.SearchOptions{
+	results, err := s.executeRecallSearch(r.Context(), recall.SearchOptions{
 		Query: req.Query, Prefix: "recall/managed/cards", MaxResults: req.MaxResults,
 	})
 	if err != nil {
@@ -621,16 +553,19 @@ func (s *Server) searchCards(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) embeddingStatus(w http.ResponseWriter, r *http.Request) {
-	embedding := s.currentEmbedding()
+	embedding := s.runtimeAI.currentEmbedding()
 	if embedding == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "enabled": false, "configured": false, "reason": "embedding service is not configured"})
+		writeJSON(w, http.StatusOK, recall.EmbeddingStatus{
+			OK: true, Model: recall.DefaultEmbeddingModel,
+			Reason: "embedding service is not configured",
+		})
 		return
 	}
 	writeJSON(w, http.StatusOK, embedding.Status(r.Context()))
 }
 
 func (s *Server) reindexEmbeddings(w http.ResponseWriter, r *http.Request) {
-	embedding := s.currentEmbedding()
+	embedding := s.runtimeAI.currentEmbedding()
 	if embedding == nil {
 		writeError(w, http.StatusServiceUnavailable, "EMBEDDING_DISABLED", "embedding service is not configured")
 		return
@@ -648,7 +583,7 @@ func (s *Server) reindexEmbeddings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) searchEmbeddings(w http.ResponseWriter, r *http.Request) {
-	embedding := s.currentEmbedding()
+	embedding := s.runtimeAI.currentEmbedding()
 	if embedding == nil {
 		writeError(w, http.StatusServiceUnavailable, "EMBEDDING_DISABLED", "embedding service is not configured")
 		return

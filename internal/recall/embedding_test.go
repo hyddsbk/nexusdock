@@ -17,7 +17,7 @@ func TestEmbeddingServiceDisabledStatus(t *testing.T) {
 	store := newTestStore(t)
 	svc := NewEmbeddingService(store, EmbeddingConfig{})
 	status := svc.Status(context.Background())
-	if status["enabled"] != false || status["model"] != DefaultEmbeddingModel {
+	if status.Enabled || status.Model != DefaultEmbeddingModel || status.Configured {
 		t.Fatalf("unexpected disabled status: %#v", status)
 	}
 }
@@ -77,6 +77,50 @@ func TestParseSimpleEmbeddingResponse(t *testing.T) {
 	}
 	if len(vectors) != 2 || vectors[0][0] != 1 || vectors[1][1] != 1 {
 		t.Fatalf("unexpected vectors: %#v", vectors)
+	}
+}
+
+func TestParseSingleEmbeddingResponseRemainsRecallOnlyCompatibility(t *testing.T) {
+	vectors, err := parseEmbeddingResponse([]byte(`{"embedding":[1,0]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vectors) != 1 || len(vectors[0]) != 2 || vectors[0][0] != 1 {
+		t.Fatalf("unexpected vectors: %#v", vectors)
+	}
+}
+
+func TestEmbeddingEndpointPreservesExplicitRecallPath(t *testing.T) {
+	path := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"index": 0, "embedding": []float64{1, 0}}}})
+	}))
+	defer server.Close()
+
+	svc := NewEmbeddingService(newTestStore(t), EmbeddingConfig{Enabled: true, Endpoint: server.URL + "/custom/embed"})
+	vectors, err := svc.embed(t.Context(), []string{"recall"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "/custom/embed" {
+		t.Fatalf("recall embedding path=%q", path)
+	}
+	if len(vectors) != 1 {
+		t.Fatalf("unexpected vectors: %#v", vectors)
+	}
+}
+
+func TestEmbeddingPreservesRecallStatusErrorText(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	svc := NewEmbeddingService(newTestStore(t), EmbeddingConfig{Enabled: true, Endpoint: server.URL})
+	_, err := svc.embed(t.Context(), []string{"recall"})
+	if err == nil || err.Error() != "embedding endpoint returned HTTP 429: rate limited" {
+		t.Fatalf("recall embedding error=%v", err)
 	}
 }
 
@@ -485,5 +529,67 @@ func TestHybridSearchUsesSemanticEnhancementAndLexicalFallback(t *testing.T) {
 	}
 	if len(fallback) == 0 || fallback[0].Path != projectPath {
 		t.Fatalf("embedding failure should keep lexical results: %#v", fallback)
+	}
+}
+
+func TestEmbeddingReindexSerializesAcrossServiceInstances(t *testing.T) {
+	store := newTestStore(t)
+	for _, item := range []struct {
+		path    string
+		content string
+	}{
+		{path: "recall/docs/projects/a/project.md", content: "# A\nalpha"},
+		{path: "recall/docs/projects/b/project.md", content: "# B\nbeta"},
+	} {
+		if _, err := store.Write(WriteRequest{Path: item.path, Content: item.content, Confirmed: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var once sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Input []string `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		entered <- struct{}{}
+		once.Do(func() { <-release })
+		data := make([]map[string]any, len(req.Input))
+		for i := range req.Input {
+			data[i] = map[string]any{"index": i, "embedding": []float64{1, 0}}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
+	}))
+	defer server.Close()
+
+	services := []*EmbeddingService{
+		NewEmbeddingService(store, EmbeddingConfig{Enabled: true, Endpoint: server.URL}),
+		NewEmbeddingService(store, EmbeddingConfig{Enabled: true, Endpoint: server.URL}),
+	}
+	prefixes := []string{"recall/docs/projects/a", "recall/docs/projects/b"}
+	errs := make(chan error, 2)
+	for i := range services {
+		go func(i int) {
+			_, err := services[i].Reindex(context.Background(), EmbeddingReindexRequest{Prefix: prefixes[i]})
+			errs <- err
+		}(i)
+	}
+	<-entered
+	close(release)
+	for range services {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	idx, err := services[0].loadIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(idx.Documents) != 2 {
+		t.Fatalf("concurrent prefix reindex lost documents: %#v", idx.Documents)
 	}
 }

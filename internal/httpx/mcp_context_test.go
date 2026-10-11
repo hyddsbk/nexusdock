@@ -105,12 +105,46 @@ func TestCallFleetAgentDockContextAggregatesOnlineAndOfflineNodes(t *testing.T) 
 			"version": "9.9.9", "os": "linux", "arch": "amd64",
 			"agentdock_home": "/wrong", "agentdock_default_dir": "/wrong", "default_cwd": ".", "path_model": "host",
 		},
-		"skills": []any{map[string]any{"name": "desktop", "description": "Desktop", "file": "skill://desktop/SKILL.md"}},
-		"common_skills": map[string]any{
-			"root": "/Users/xx/.agents/skills", "total": 1, "truncated": false,
-			"items": []any{map[string]any{"name": "personal-dev-guard", "description": "Development guard", "file": "/Users/xx/.agents/skills/personal-dev-guard/SKILL.md"}},
+		"skills": []any{
+			map[string]any{
+				"name": "desktop", "description": "Desktop", "file": "skill://managed/desktop/SKILL.md",
+				"skill_ref": "skill://managed/desktop", "source_type": "managed",
+				"content_digest": "sha256:desktop",
+			},
+			map[string]any{
+				"name": "plugin-skill", "description": "Plugin Skill", "file": "skill://plugin/demo.plugin/plugin-skill/SKILL.md",
+				"skill_ref": "skill://plugin/demo.plugin/plugin-skill", "source_type": "plugin",
+				"plugin_name": "demo.plugin",
+			},
 		},
-		"dynamic_mcp":        []any{map[string]any{"name": "github", "description": "GitHub"}},
+		"common_skills": map[string]any{
+			"root": "/test/agentdock/.agents/skills", "total": 1, "truncated": false,
+			"items": []any{map[string]any{
+				"name": "personal-dev-guard", "description": "Development guard", "file": "skill://shared/personal-dev-guard/SKILL.md",
+				"skill_ref": "skill://shared/personal-dev-guard", "source_type": "shared",
+			}},
+		},
+		"plugins": []any{
+			map[string]any{
+				"name": "demo.plugin", "version": "1.2.3", "enabled": true, "description": "Demo Plugin",
+				"skills_count": 1, "mcp_count": 1, "format": "openai",
+			},
+		},
+		"dynamic_mcp": []any{
+			map[string]any{"name": "github", "description": "GitHub"},
+			map[string]any{
+				"name": "plugin.demo.plugin.remote", "display_name": "remote", "description": "Plugin MCP",
+				"source_type": "plugin", "plugin_name": "demo.plugin", "status": "idle", "tool_count": 0,
+			},
+		},
+		"acp": map[string]any{
+			"enabled": true, "default_profile": "codex",
+			"profiles": []any{
+				map[string]any{"id": "custom", "kind": "custom"},
+				map[string]any{"id": "codex", "kind": "codex"},
+			},
+			"description": "ACP",
+		},
 		"workflow_templates": []any{map[string]any{"name": "deploy", "description": "Deploy"}},
 		"recall":             map[string]any{"enabled": true, "items": []any{map[string]any{"name": "profile.md", "description": "Profile"}}},
 		"rules":              []any{"rule-a", "rule-b"},
@@ -131,14 +165,33 @@ func TestCallFleetAgentDockContextAggregatesOnlineAndOfflineNodes(t *testing.T) 
 	}
 	assertCentralToolResultMatchesOutputSchema(t, "agentdock_context", result)
 	var fleet fleetAgentDockContext
-	if err := decodeMap(result, &fleet); err != nil {
+	if err := decodeBoundaryMap(result, &fleet); err != nil {
 		t.Fatal(err)
 	}
 	if len(fleet.Nodes) != 2 {
 		t.Fatalf("enabled fleet nodes = %#v", fleet.Nodes)
 	}
-	if fleet.Nodes[0].Name != "DockMini" || !fleet.Nodes[0].Online || containsString(fleet.Nodes[0].Capabilities, descriptor.Name) || fleet.Nodes[0].Context == nil || len(fleet.Nodes[0].Context.Skills) != 1 {
+	if fleet.Nodes[0].Name != "DockMini" || !fleet.Nodes[0].Online || containsString(fleet.Nodes[0].Capabilities, descriptor.Name) || fleet.Nodes[0].Context == nil || len(fleet.Nodes[0].Context.Skills) != 2 {
 		t.Fatalf("online node context = %#v", fleet.Nodes[0])
+	}
+	if fleet.Nodes[0].Context.Skills[1].SourceType != "plugin" || fleet.Nodes[0].Context.Skills[1].PluginName != "demo.plugin" {
+		t.Fatalf("Plugin Skill provenance was not forwarded: %#v", fleet.Nodes[0].Context.Skills)
+	}
+	if len(fleet.Nodes[0].Context.Plugins) != 1 ||
+		fleet.Nodes[0].Context.Plugins[0].Name != "demo.plugin" ||
+		fleet.Nodes[0].Context.Plugins[0].Format != "openai" {
+		t.Fatalf("Plugin context index was not forwarded: %#v", fleet.Nodes[0].Context.Plugins)
+	}
+	if len(fleet.Nodes[0].Context.DynamicMCP) != 2 ||
+		fleet.Nodes[0].Context.DynamicMCP[0].SourceType != "standalone" ||
+		fleet.Nodes[0].Context.DynamicMCP[1].SourceType != "plugin" ||
+		fleet.Nodes[0].Context.DynamicMCP[1].PluginName != "demo.plugin" {
+		t.Fatalf("Plugin MCP provenance was not forwarded: %#v", fleet.Nodes[0].Context.DynamicMCP)
+	}
+	if fleet.Nodes[0].Context.ACP == nil ||
+		fleet.Nodes[0].Context.ACP.DefaultProfile != "codex" ||
+		len(fleet.Nodes[0].Context.ACP.Profiles) != 2 {
+		t.Fatalf("multi-ACP context was not forwarded: %#v", fleet.Nodes[0].Context.ACP)
 	}
 	if fleet.Nodes[0].Context.CommonSkills == nil || fleet.Nodes[0].Context.CommonSkills.Total != 1 || len(fleet.Nodes[0].Context.CommonSkills.Items) != 1 || fleet.Nodes[0].Context.CommonSkills.Items[0].Name != "personal-dev-guard" {
 		t.Fatalf("common Skill context was not forwarded: %#v", fleet.Nodes[0].Context.CommonSkills)
@@ -181,7 +234,7 @@ func TestFleetContextKeepsNexusSharedContextWhenAllNodesAreOffline(t *testing.T)
 		t.Fatal(err)
 	}
 	var fleet fleetAgentDockContext
-	if err := decodeMap(result, &fleet); err != nil {
+	if err := decodeBoundaryMap(result, &fleet); err != nil {
 		t.Fatal(err)
 	}
 	if len(fleet.Nodes) != 1 || fleet.Nodes[0].Online || fleet.Nodes[0].Error != agentdock.ErrNodeOffline.Error() {
@@ -211,6 +264,21 @@ func TestDecodeAgentDockContextRejectsLegacyMarkdownResult(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "结构化契约") {
 		t.Fatalf("legacy context should be rejected, got %v", err)
+	}
+}
+
+func TestDecodeAgentDockContextRejectsSkillWithoutProvenance(t *testing.T) {
+	_, err := decodeAgentDockContextResult(map[string]any{
+		"isError": false,
+		"structuredContent": map[string]any{
+			"skills": []any{map[string]any{
+				"name": "desktop", "description": "Desktop", "file": "skill://desktop/SKILL.md",
+			}},
+			"dynamic_mcp": []any{}, "workflow_templates": []any{}, "rules": []any{},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "skill_ref") {
+		t.Fatalf("Skill without provenance should be rejected, got %v", err)
 	}
 }
 
@@ -244,7 +312,7 @@ func connectFleetContextTestNode(t *testing.T, hub *agentdock.Hub, node agentdoc
 	t.Helper()
 	connected := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := hub.Accept(w, r, node.ID); err != nil {
+		if err := hub.Accept(w, r, node.ID, ""); err != nil {
 			t.Errorf("accept context node: %v", err)
 			return
 		}
@@ -331,7 +399,7 @@ func TestFleetContextReturnsPartialResultWhenNodeContextTimesOut(t *testing.T) {
 		t.Fatalf("fleet context timeout took %v", elapsed)
 	}
 	var fleet fleetAgentDockContext
-	if err := decodeMap(result, &fleet); err != nil {
+	if err := decodeBoundaryMap(result, &fleet); err != nil {
 		t.Fatal(err)
 	}
 	if len(fleet.Nodes) != 1 || !fleet.Nodes[0].Online || fleet.Nodes[0].Error != "context timeout" || fleet.Nodes[0].Context != nil {
@@ -346,7 +414,7 @@ func connectStalledFleetContextTestNode(t *testing.T, hub *agentdock.Hub, node a
 	t.Helper()
 	connected := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := hub.Accept(w, r, node.ID); err != nil {
+		if err := hub.Accept(w, r, node.ID, ""); err != nil {
 			t.Errorf("accept stalled context node: %v", err)
 			return
 		}

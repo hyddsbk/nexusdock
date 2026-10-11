@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -35,6 +36,12 @@ type Registry struct {
 	// 互斥只是为了避免发布/退役/列表交错导致读到半更新的目录状态。
 	mu   sync.Mutex
 	root string
+}
+
+type publishIntent struct {
+	ID          string    `json:"id"`
+	Version     string    `json:"version"`
+	PublishedAt time.Time `json:"published_at"`
 }
 
 // NewRegistry 使用组合根传入的数据目录；published 文件与向量索引都存放在其下。
@@ -67,7 +74,7 @@ func (r *Registry) ensureDirs() error {
 
 // Publish 发布一个新版本：这是唯一的写入口。调用方携带的生命周期元数据
 // （status/hash/时间戳）一律忽略，避免伪造状态或复用旧哈希；同版本已发布
-// 则拒绝覆盖，旧 active 版本被退役，任一步失败都会回滚到发布前状态。
+// 则拒绝覆盖。发布前先落盘 intent，保证跨多个模板文件的状态在崩溃后可幂等前滚。
 func (r *Registry) Publish(input Template) (Template, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -78,6 +85,9 @@ func (r *Registry) Publish(input Template) (Template, error) {
 	t.PublishedAt = nil
 	t.RetiredAt = nil
 	if err := r.ensureDirs(); err != nil {
+		return Template{}, operationError("WORKFLOW_REGISTRY_FAILED", err)
+	}
+	if err := r.recoverPendingPublishLocked(); err != nil {
 		return Template{}, operationError("WORKFLOW_REGISTRY_FAILED", err)
 	}
 	if err := validateTemplate(t); err != nil {
@@ -92,9 +102,18 @@ func (r *Registry) Publish(input Template) (Template, error) {
 	now := time.Now().UTC()
 	t.PublishedAt = &now
 	t.Hash = templateHash(t)
+	intent := publishIntent{ID: t.ID, Version: t.Version, PublishedAt: now}
+	if err := writeTemplateJSON(r.publishIntentPath(), intent); err != nil {
+		return Template{}, operationError("WORKFLOW_PUBLISH_FAILED", fmt.Errorf("persist publish intent: %w", err))
+	}
 	errorCode, err := r.publishWithWriter(t, now, writeTemplateJSON)
 	if err != nil {
+		// intent 必须保留：目标文件可能已经原子落盘，也可能尚未出现。
+		// 下一次访问由 recoverPendingPublishLocked 根据真实文件状态幂等前滚或清理。
 		return Template{}, operationError(errorCode, err)
+	}
+	if err := r.clearPublishIntent(); err != nil {
+		return Template{}, operationError("WORKFLOW_REGISTRY_FAILED", fmt.Errorf("clear publish intent: %w", err))
 	}
 	return t, nil
 }
@@ -108,6 +127,9 @@ func (r *Registry) Retire(id, version string) (Template, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := r.ensureDirs(); err != nil {
+		return Template{}, operationError("WORKFLOW_REGISTRY_FAILED", err)
+	}
+	if err := r.recoverPendingPublishLocked(); err != nil {
 		return Template{}, operationError("WORKFLOW_REGISTRY_FAILED", err)
 	}
 	t, err := r.load("published", id, version)
@@ -132,6 +154,12 @@ func (r *Registry) Retire(id, version string) (Template, error) {
 func (r *Registry) Get(id, version string) (Template, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if err := r.ensureDirs(); err != nil {
+		return Template{}, err
+	}
+	if err := r.recoverPendingPublishLocked(); err != nil {
+		return Template{}, err
+	}
 	t, err := r.load("published", id, version)
 	if err == nil {
 		return t, nil
@@ -170,6 +198,9 @@ func (r *Registry) List(status Status) ([]Template, error) {
 
 func (r *Registry) listLocked(status Status) ([]Template, error) {
 	if err := r.ensureDirs(); err != nil {
+		return nil, err
+	}
+	if err := r.recoverPendingPublishLocked(); err != nil {
 		return nil, err
 	}
 
@@ -232,25 +263,69 @@ func decodeTemplate(data []byte) (Template, error) {
 	return template, nil
 }
 
+func (r *Registry) publishIntentPath() string {
+	return filepath.Join(r.root, ".publish-intent.json")
+}
+
+func (r *Registry) clearPublishIntent() error {
+	return removeFile(r.publishIntentPath())
+}
+
+// recoverPendingPublishLocked 收敛进程在发布中途退出留下的多 active 状态。
+// intent 在新版本落盘前先持久化，因此恢复时可以明确知道哪一个版本是目标版本，
+// 不依赖版本号大小或墙上时钟猜测。调用方必须持有 r.mu。
+func (r *Registry) recoverPendingPublishLocked() error {
+	data, err := os.ReadFile(r.publishIntentPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read workflow publish intent: %w", err)
+	}
+	var intent publishIntent
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&intent); err != nil {
+		return fmt.Errorf("decode workflow publish intent: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("workflow publish intent contains multiple JSON values")
+		}
+		return fmt.Errorf("read trailing workflow publish intent data: %w", err)
+	}
+	if !ValidToken(intent.ID) || !ValidToken(intent.Version) || intent.PublishedAt.IsZero() {
+		return errors.New("workflow publish intent is invalid")
+	}
+	target, err := r.load("published", intent.ID, intent.Version)
+	if errors.Is(err, os.ErrNotExist) {
+		// 进程在 intent 持久化后、目标版本真正落盘前退出；旧 active 从未被修改。
+		return r.clearPublishIntent()
+	}
+	if err != nil {
+		return fmt.Errorf("load workflow publish target during recovery: %w", err)
+	}
+	if target.Status != StatusActive {
+		return fmt.Errorf("workflow publish target %s@%s is not active during recovery", intent.ID, intent.Version)
+	}
+	if err := r.retireActiveWithWriter(intent.ID, intent.Version, intent.PublishedAt, writeTemplateJSON); err != nil {
+		return fmt.Errorf("recover workflow publish: %w", err)
+	}
+	return r.clearPublishIntent()
+}
+
 // jsonWriter 是发布/退役落盘的写入函数，测试用它注入磁盘故障来验证回滚行为。
 type jsonWriter func(string, any) error
 
-// publishWithWriter 先写新版本文件，再退役同 ID 的旧 active 版本；
-// 两步中任一步失败都回滚已产生的变更，返回值是供边界使用的错误码。
+// publishWithWriter 先写新版本文件，再退役同 ID 的旧 active 版本。
+// 新版本一旦可能落盘就不再删除：生产路径已经先持久化 publish intent，
+// 任一后续失败都由下一次访问按 intent 幂等前滚，避免“回滚本身失败”再次制造半提交。
 func (r *Registry) publishWithWriter(t Template, publishedAt time.Time, write jsonWriter) (string, error) {
 	publishedPath := r.templatePath("published", t.ID, t.Version)
 	if err := write(publishedPath, t); err != nil {
-		rollbackErr := removeFile(publishedPath)
-		if rollbackErr != nil {
-			return "WORKFLOW_PUBLISH_FAILED", fmt.Errorf("write new published template: %w; rollback partial file: %v", err, rollbackErr)
-		}
 		return "WORKFLOW_PUBLISH_FAILED", fmt.Errorf("write new published template: %w", err)
 	}
 	if err := r.retireActiveWithWriter(t.ID, t.Version, publishedAt, write); err != nil {
-		rollbackErr := removeFile(publishedPath)
-		if rollbackErr != nil {
-			return "WORKFLOW_RETIRE_OLD_FAILED", fmt.Errorf("retire old templates: %w; rollback new template: %v", err, rollbackErr)
-		}
 		return "WORKFLOW_RETIRE_OLD_FAILED", fmt.Errorf("retire old templates: %w", err)
 	}
 	return "", nil
@@ -352,6 +427,11 @@ func removeFile(path string) error {
 }
 
 func syncDir(path string) error {
+	// Windows does not support fsync on directory handles consistently; attempting
+	// it returns Access is denied. File contents are already fsynced before rename.
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	directory, err := os.Open(filepath.Dir(path))
 	if err != nil {
 		return err

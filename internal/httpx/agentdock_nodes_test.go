@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	protocol "github.com/uvwt/agentdock-protocol"
 	"github.com/uvwt/agentdock-protocol/mcpcontract"
 	"github.com/uvwt/nexusdock/internal/agentdock"
 	"github.com/uvwt/nexusdock/internal/auth"
@@ -33,7 +34,7 @@ func newNodeTestServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Server{agentDock: store, agentDockHub: agentdock.NewHub(store), auth: auth.NewService(db)}
+	return &Server{agentDock: store, agentDockHub: agentdock.NewHub(store), access: accessControl{auth: auth.NewService(db)}}
 }
 
 func TestPairingIssuesDeviceTokenWithoutAgentDockToken(t *testing.T) {
@@ -48,17 +49,14 @@ func TestPairingIssuesDeviceTokenWithoutAgentDockToken(t *testing.T) {
 	if response.Code != http.StatusCreated {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
-	var result struct {
-		Node        agentdock.Node `json:"node"`
-		DeviceToken string         `json:"device_token"`
-	}
+	var result protocol.PairResponse
 	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
 	if result.Node.ID == "" || result.DeviceToken == "" || strings.Contains(response.Body.String(), "endpoint") {
 		t.Fatalf("unexpected pairing response: %s", response.Body.String())
 	}
-	principal, err := server.auth.Authenticate(t.Context(), result.DeviceToken)
+	principal, err := server.access.auth.Authenticate(t.Context(), result.DeviceToken)
 	if err != nil || principal.Actor.Type != core.ActorDevice || principal.Actor.ID != result.Node.ID {
 		t.Fatalf("device principal=%#v err=%v", principal, err)
 	}
@@ -99,7 +97,7 @@ func TestNodeConnectDistinguishesInvalidTokenFromAuthBackendFailure(t *testing.T
 		if err := db.Close(); err != nil {
 			t.Fatal(err)
 		}
-		server := &Server{auth: authService, agentDockHub: agentdock.NewHub(nil)}
+		server := &Server{access: accessControl{auth: authService}, agentDockHub: agentdock.NewHub(nil)}
 		request := httptest.NewRequest(http.MethodGet, "/v1/nodes/connect", nil)
 		request.Header.Set("Authorization", "Bearer any-device-token")
 		response := httptest.NewRecorder()
@@ -118,23 +116,23 @@ func TestDeviceTokenAccessesOnlyExplicitDeviceRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	issued, err := server.auth.IssueToken(t.Context(), core.Actor{Type: core.ActorDevice, ID: node.ID}, "device_token", nil, 0)
+	issued, err := server.access.auth.IssueToken(t.Context(), core.Actor{Type: core.ActorDevice, ID: node.ID}, "device_token", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodGet, "/v1/recall", nil)
 	request.Header.Set("Authorization", "Bearer "+issued.Token)
 	response := httptest.NewRecorder()
-	server.withDeviceOrAPIAccess(func(w http.ResponseWriter, _ *http.Request) {
+	server.withDeviceOrAPIAccess(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-	})(response, request)
+	})).ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("device route status=%d body=%s", response.Code, response.Body.String())
 	}
 
 	// 管理 API 仍使用普通 API/管理员认证，Device Token 不会被 withAPIAccess 接受。
 	adminResponse := httptest.NewRecorder()
-	server.withAPIAccess(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })(adminResponse, request)
+	server.access.withAPIAccess(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })).ServeHTTP(adminResponse, request)
 	if adminResponse.Code != http.StatusUnauthorized {
 		t.Fatalf("admin route status=%d, want 401", adminResponse.Code)
 	}
@@ -156,7 +154,7 @@ func TestDeviceTokenRecallPreviewUsesRealStoreWithoutPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	issued, err := server.auth.IssueToken(t.Context(), core.Actor{Type: core.ActorDevice, ID: node.ID}, "device_token", nil, 0)
+	issued, err := server.access.auth.IssueToken(t.Context(), core.Actor{Type: core.ActorDevice, ID: node.ID}, "device_token", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +244,7 @@ func TestNodeEnableReconcileKeepsCanonicalToolsCentral(t *testing.T) {
 	}
 
 	clientTransport, serverTransport := mcpsdk.NewInMemoryTransports()
-	serverSession, err := server.mcpServer.Connect(t.Context(), serverTransport, nil)
+	serverSession, err := server.mcp.server.Connect(t.Context(), serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

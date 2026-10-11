@@ -36,8 +36,8 @@ func TestSyncMCPAppResourcesPublishesAdvertisedUIResources(t *testing.T) {
 
 	sdk := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil)
 	server := &Server{
-		cfg: config.Config{PublicURL: domain}, agentDock: store, mcpServer: sdk,
-		mcpAppsEnabledState: true, mcpResources: make(map[string]struct{}),
+		cfg: config.Config{PublicURL: domain}, agentDock: store, mcp: &mcpGateway{server: sdk, resources: make(map[string]struct{})},
+		mcpAppsEnabledState: true,
 	}
 	server.syncMCPAppResources()
 
@@ -90,8 +90,8 @@ func TestNexusOwnedMCPAppResourcesDoNotRequireAgentDockProvider(t *testing.T) {
 	const domain = "https://nexus.example.test"
 	sdk := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "local-app-test", Version: "1"}, nil)
 	server := &Server{
-		cfg: config.Config{PublicURL: domain}, mcpServer: sdk,
-		mcpAppsEnabledState: true, mcpResources: make(map[string]struct{}),
+		cfg: config.Config{PublicURL: domain}, mcp: &mcpGateway{server: sdk, resources: make(map[string]struct{})},
+		mcpAppsEnabledState: true,
 	}
 	server.syncMCPAppResources()
 
@@ -157,17 +157,16 @@ func TestMCPAppsToggleRemovesRelayButKeepsPersistedCapabilities(t *testing.T) {
 
 	sdk := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "toggle-test", Version: "1"}, nil)
 	server := &Server{
-		mcpAppsEnabledState: true, agentDock: store, mcpServer: sdk,
-		mcpResources: make(map[string]struct{}),
+		mcpAppsEnabledState: true, agentDock: store, mcp: &mcpGateway{server: sdk, resources: make(map[string]struct{})},
 	}
 	server.syncMCPAppResources()
-	if _, ok := server.mcpResources[capability.URI]; !ok {
+	if _, ok := server.mcp.resources[capability.URI]; !ok {
 		t.Fatalf("resource %s was not published before toggle", capability.URI)
 	}
 
 	server.setMCPAppsEnabled(false)
-	if len(server.mcpResources) != 0 {
-		t.Fatalf("resources were not removed after disabling MCP Apps UI: %#v", server.mcpResources)
+	if len(server.mcp.resources) != 0 {
+		t.Fatalf("resources were not removed after disabling MCP Apps UI: %#v", server.mcp.resources)
 	}
 	persisted, err := store.UIResources(t.Context(), node.ID)
 	if err != nil {
@@ -178,7 +177,7 @@ func TestMCPAppsToggleRemovesRelayButKeepsPersistedCapabilities(t *testing.T) {
 	}
 
 	server.setMCPAppsEnabled(true)
-	if _, ok := server.mcpResources[capability.URI]; !ok {
+	if _, ok := server.mcp.resources[capability.URI]; !ok {
 		t.Fatalf("resource %s was not restored after enabling MCP Apps UI", capability.URI)
 	}
 }
@@ -220,10 +219,10 @@ func TestPublishedMCPAppResourcesRecoverFromPersistedCapabilities(t *testing.T) 
 }
 
 func TestCentralWorkflowResultMetaIsActionScoped(t *testing.T) {
-	if meta := centralToolResultMeta("workflow_template_manage", map[string]any{"action": "list"}); meta != nil {
+	if meta := centralToolResultMetaForTest(t, "workflow_template_manage", map[string]any{"action": "list"}); meta != nil {
 		t.Fatalf("list unexpectedly has Workflow UI meta: %#v", meta)
 	}
-	meta := centralToolResultMeta("workflow_template_manage", map[string]any{"action": "match"})
+	meta := centralToolResultMetaForTest(t, "workflow_template_manage", map[string]any{"action": "match"})
 	ui, ok := meta["ui"].(map[string]any)
 	if !ok || ui["resourceUri"] != protocol.WorkflowUIResourceURI {
 		t.Fatalf("match Workflow UI meta = %#v", meta)
@@ -330,6 +329,45 @@ func TestMCPAppResourceSelectsOnlyExplicitCapableProvider(t *testing.T) {
 	}
 }
 
+func TestImageMCPAppResourceRelaysAgentDockHTML(t *testing.T) {
+	store := newHTTPTestAgentDockStore(t)
+	descriptor := agentdock.ToolDescriptor{
+		Name: "view_image", InputSchema: map[string]any{"type": "object"},
+		Meta: map[string]any{"ui": map[string]any{"resourceUri": protocol.ImageUIResourceURI}},
+	}
+	node := pairHTTPTestNode(t, store, "device_image_resource", "DockMini", "2.0.0", descriptor)
+	hub := agentdock.NewHub(store)
+	capability := agentdock.UIResourceCapability{
+		URI: protocol.ImageUIResourceURI, Contract: protocol.ImageUIContract, MIMEType: protocol.MCPAppMIMEType,
+	}
+	const imageHTML = "<!doctype html><title>AgentDock Image passthrough</title>"
+	invoked := connectResourceTestNode(
+		t, hub, node, descriptor, []agentdock.UIResourceCapability{capability},
+		protocol.ImageUIResourceURI, imageHTML, true,
+	)
+
+	nodes, err := store.List(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{
+		agentDock: store, agentDockHub: hub,
+		cfg: config.Config{PublicURL: "https://nexus.example.test"},
+	}
+	read, err := server.readMCPAppResourceWithTimeout(t.Context(), nodes, protocol.ImageUIResourceURI, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(read.Contents) != 1 || read.Contents[0].Text != imageHTML {
+		t.Fatalf("Image App relay changed AgentDock HTML: %#v", read.Contents)
+	}
+	select {
+	case <-invoked:
+	case <-time.After(time.Second):
+		t.Fatal("AgentDock Image App provider was not invoked")
+	}
+}
+
 func TestMCPAppResourceBoundsStalledCompatibleProvider(t *testing.T) {
 	store := newHTTPTestAgentDockStore(t)
 	descriptor := agentdock.ToolDescriptor{Name: "task_manage", InputSchema: map[string]any{"type": "object"}}
@@ -358,7 +396,7 @@ func connectResourceTestNode(t *testing.T, hub *agentdock.Hub, node agentdock.No
 	t.Helper()
 	connected := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := hub.Accept(w, r, node.ID); err != nil {
+		if err := hub.Accept(w, r, node.ID, ""); err != nil {
 			t.Errorf("accept resource node: %v", err)
 			return
 		}

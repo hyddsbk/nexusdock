@@ -4,11 +4,11 @@ import { useTranslation } from 'react-i18next';
 import i18n from './i18n';
 import {
   Activity, BrainCircuit, Cable, ChevronRight,
-  CircleAlert, Database, FileJson, FolderKanban, Home, ListChecks, Menu, RefreshCw,
-  ServerCog, Settings, ShieldCheck, UserRound, Wrench, X,
+  CircleAlert, CirclePlus, Database, FileJson, FolderKanban, Home, ListChecks, Menu, RefreshCw,
+  Package, ServerCog, Settings, UserRound, Wrench, X,
 } from 'lucide-react';
 import RecallWorkspace from './RecallWorkspace';
-import { type WebSession } from './Auth';
+import type { SystemStatus, WebSession, WebSessionResponse } from './api/generated';
 import AccountSecurity from './AccountSecurity';
 import AISettingsPanel from './components/settings/AISettingsPanel';
 import LanguageSettingsPanel from './components/settings/LanguageSettingsPanel';
@@ -16,8 +16,10 @@ import MCPAccessPanel from './components/settings/MCPAccessPanel';
 import { ApiError, api, setCSRFToken } from './api/client';
 import WorkflowTemplatesPage from './components/workflows/WorkflowTemplatesPage';
 import { SkillsPage, TaskCenterPage } from './components/runtime/RuntimePages';
+import DiagnosticsPage from './components/runtime/DiagnosticsPage';
 import MCPPage from './components/runtime/MCPPage';
 import WorkspacePage from './components/runtime/WorkspacePage';
+import PluginPage from './components/runtime/PluginPage';
 import {
   AgentDockNodeRequired,
   AgentDockNodeSelector,
@@ -26,33 +28,24 @@ import {
 } from './components/runtime/AgentDockNodes';
 import './nexus.css';
 
-type RuntimeSection = 'workspaces' | 'tasks' | 'skills' | 'mcp';
+type RuntimeSection = 'workspaces' | 'tasks' | 'skills' | 'plugins' | 'mcp' | 'diagnostics';
 type Section = 'home' | 'recall' | 'templates' | RuntimeSection | 'settings';
 type SettingsSection = 'account' | 'mcp' | 'ai' | 'system';
 type Tone = 'ok' | 'warn' | 'danger' | 'info' | 'muted';
 
-
-type SystemStatus = {
-  ok: boolean;
-  service: string;
-  version?: string;
-  revision?: string;
-  database: string;
-  schema_version: number;
-  nexus_data_dir?: string;
-  recall_repo_dir?: string;
-};
 
 type RuntimeOverview = {
   ok: boolean;
   tasks?: { active_recent_24h?: number };
   skills?: { count?: number };
   mcp?: { count?: number };
+  plugins?: { count?: number; available?: boolean };
 };
 
 type RuntimeNodeMetrics = {
   skills: number;
   mcp: number;
+  plugins: number | null;
   activeRecent24h: number;
 };
 
@@ -71,8 +64,10 @@ type NavGroup = { label: string; items: SectionMeta[] };
 const RUNTIME_SECTIONS: RuntimeSectionMeta[] = [
   { id: 'workspaces', label: 'Workspaces', icon: FolderKanban },
   { id: 'tasks', label: 'Tasks', icon: ListChecks },
+  { id: 'plugins', label: 'Plugin', icon: Package },
   { id: 'skills', label: 'Skill', icon: Wrench },
   { id: 'mcp', label: 'MCP', icon: Cable },
+  { id: 'diagnostics', label: 'Diagnostics', icon: Activity },
 ];
 
 const NAV: SectionMeta[] = [
@@ -153,7 +148,7 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    api<{ ok: boolean; session: WebSession }>('/v1/auth/session').then((result) => {
+    api<WebSessionResponse>('/v1/auth/session').then((result) => {
       if (cancelled) return;
       setSession(result.session);
       if (result.session.csrf_token) setCSRFToken(result.session.csrf_token);
@@ -204,7 +199,6 @@ export default function App() {
             })}
           </div>)}
         </nav>
-        <div className="nexus-sidebar-foot"><ShieldCheck size={16} /><span><strong>Private workspace</strong><small>Local-first console</small></span></div>
       </aside>
       {menuOpen && <button type="button" className="nexus-scrim" aria-label={t('Close menu')} onClick={() => setMenuOpen(false)} />}
       <main className="nexus-main">
@@ -281,6 +275,7 @@ function useRuntimeNodeMetrics(runtimeNodes: RuntimeNodesState, refreshToken: nu
           data[result.nodeID] = {
             skills: result.summary.skills?.count || 0,
             mcp: result.summary.mcp?.count || 0,
+            plugins: result.summary.plugins?.available === false ? null : (result.summary.plugins?.count ?? 0),
             activeRecent24h: result.summary.tasks?.active_recent_24h || 0,
           };
         } else if ('error' in result && result.error) {
@@ -304,27 +299,33 @@ function HomePage({ refreshToken, runtimeNodes, navigate }: { refreshToken: numb
   const offlineNodes = enabledNodes.filter((node) => !node.online);
   const runtimeErrors = Object.entries(runtimeMetrics.errors).map(([nodeID, message]) => {
     const node = runtimeNodes.nodes.find((item) => item.id === nodeID);
-    return `${node?.name || nodeID}: ${message}`;
+    const displayMessage = message === t('Request failed') || message === 'Request failed'
+      ? t('Request failed. Check whether AgentDock and NexusDock need to be updated.')
+      : message;
+    return `${node?.name || nodeID}: ${displayMessage}`;
   });
-  const errors = [system.error, runtimeNodes.error, ...runtimeErrors].filter(Boolean) as string[];
+  const serviceErrors = [system.error, runtimeNodes.error].filter(Boolean) as string[];
+  const errors = [...serviceErrors, ...runtimeErrors];
   const systemTone = system.data.ok ? 'ok' : 'danger';
   const nodesTone: Tone = runtimeNodes.loading ? 'muted' : offlineNodes.length > 0 ? 'danger' : enabledNodes.length > 0 ? 'ok' : 'muted';
   const nodeSummary = runtimeNodes.loading ? t('Loading') : enabledNodes.length > 0 ? t('{{online}}/{{total}} online', { online: onlineNodes.length, total: enabledNodes.length }) : t('No nodes');
   const databaseAbnormal = system.live && !system.data.ok;
   const needsAttention = databaseAbnormal || offlineNodes.length > 0 || errors.length > 0;
+  // 节点离线或单节点概览读取失败不代表 Nexus 核心服务异常，顶部状态只反映中心服务本身。
+  const coreNeedsAttention = databaseAbnormal || serviceErrors.length > 0;
 
   return <>
     <section className="nexus-overview-strip">
-      <div><span className="nexus-kicker">{t('Personal console')}</span><h2>{needsAttention ? t('Items need attention') : t('Core services are healthy')}</h2><p>{t('Database {{database}} · Nodes {{nodes}}', { database: system.data.database || 'unknown', nodes: nodeSummary })}</p></div>
+      <div><span className="nexus-kicker">{t('System overview')}</span><h2>{coreNeedsAttention ? t('Items need attention') : t('Running normally')}</h2></div>
       <div className="nexus-overview-status"><StatusBadge tone={systemTone}>Nexus</StatusBadge><StatusBadge tone={nodesTone}>{t('Nodes {{summary}}', { summary: nodeSummary })}</StatusBadge></div>
     </section>
-    {errors.length > 0 && <InlineAlert tone="danger" title={t('Some data could not be loaded')} message={errors.join('; ')} />}
+    {serviceErrors.length > 0 && <InlineAlert tone="danger" title={t('Some data could not be loaded')} message={serviceErrors.join('; ')} />}
 
     <NodeOverview runtimeNodes={runtimeNodes} runtimeMetrics={runtimeMetrics} />
 
     {needsAttention && <Panel className="dashboard-attention-panel" icon={CircleAlert} title={t('Needs attention')} subtitle={t('Only issues that affect normal use are shown')}>
       {databaseAbnormal && <button type="button" className="attention-row" onClick={() => navigate('settings')}><StatusBadge tone="danger">{t('Abnormal')}</StatusBadge><span><strong>{t('Database abnormal')}</strong><small>{system.data.database || 'unknown'}</small></span><ChevronRight size={16} /></button>}
-      {offlineNodes.map((node) => <button type="button" className="attention-row" key={node.id} onClick={() => { window.location.hash = 'settings/system'; }}><StatusBadge tone="danger">{t('Offline')}</StatusBadge><span><strong>{node.name}</strong><small>{formatTime(node.last_seen_at, { compact: true })}</small></span><ChevronRight size={16} /></button>)}
+      {offlineNodes.map((node) => <button type="button" className="attention-row" key={node.id} onClick={() => { window.location.hash = 'settings/system'; }}><StatusBadge tone="danger">{t('Offline')}</StatusBadge><span><strong>{node.name}</strong></span><small className="attention-row-time">{formatTime(node.last_seen_at, { compact: true })}</small><ChevronRight size={16} /></button>)}
       {errors.map((message) => <div className="nx-alert is-error" key={message}>{message}</div>)}
     </Panel>}
   </>;
@@ -333,6 +334,10 @@ function HomePage({ refreshToken, runtimeNodes, navigate }: { refreshToken: numb
 function NodeOverview({ runtimeNodes, runtimeMetrics }: { runtimeNodes: RuntimeNodesState; runtimeMetrics: RuntimeMetricsState }) {
   const { t } = useTranslation();
   const onlineCount = runtimeNodes.nodes.filter((node) => node.enabled && node.online).length;
+  const orderedNodes = [
+    ...runtimeNodes.nodes.filter((node) => node.enabled),
+    ...runtimeNodes.nodes.filter((node) => !node.enabled),
+  ];
   return <section className="dashboard-node-section">
     <header>
       <div className="dashboard-node-heading"><span className="nexus-panel-icon"><ServerCog size={17} /></span><div><h3>{t('AgentDock nodes')}</h3><p>{runtimeNodes.loading ? t('Loading node status…') : t('{{count}} nodes · {{online}} online', { count: runtimeNodes.nodes.length, online: onlineCount })}</p></div></div>
@@ -341,14 +346,15 @@ function NodeOverview({ runtimeNodes, runtimeMetrics }: { runtimeNodes: RuntimeN
     <div className="dashboard-node-list">
       {runtimeNodes.loading && runtimeNodes.nodes.length === 0 && <EmptyMini text={t('Loading AgentDock nodes…')} />}
       {!runtimeNodes.loading && runtimeNodes.nodes.length === 0 && <EmptyMini text={t('No AgentDock nodes have been paired.')} />}
-      {runtimeNodes.nodes.map((node) => {
+      {orderedNodes.map((node) => {
         const statusTone: Tone = !node.enabled ? 'muted' : node.online ? 'ok' : 'danger';
-        const statusLabel = !node.enabled ? t('Disabled') : node.online ? t('Online') : t('Offline');
+        const statusLabel = !node.enabled ? t('Node disabled') : node.online ? t('Online') : t('Offline');
         const metrics = runtimeMetrics.data[node.id];
-        const metricValue = (value?: number) => {
+        const metricValue = (value?: number | null) => {
           if (!node.enabled || !node.online) return '—';
           if (runtimeMetrics.loading && !metrics) return t('Loading');
-          return metrics ? String(value ?? 0) : '—';
+          if (!metrics || value == null) return '—';
+          return String(value);
         };
         return <article className="dashboard-node-row" key={node.id}>
           <div className="dashboard-node-identity">
@@ -359,6 +365,7 @@ function NodeOverview({ runtimeNodes, runtimeMetrics }: { runtimeNodes: RuntimeN
             <span><small>AgentDock</small><strong>{node.version ? `v${node.version}` : t('Unknown')}</strong></span>
             <span><small>Skill</small><strong>{metricValue(metrics?.skills)}</strong></span>
             <span><small>MCP</small><strong>{metricValue(metrics?.mcp)}</strong></span>
+            <span><small>Plugin</small><strong>{metricValue(metrics?.plugins)}</strong></span>
             <span><small>{t('In progress (24h)')}</small><strong>{metricValue(metrics?.activeRecent24h)}</strong></span>
             <span><small>{t('Tools')}</small><strong>{t('{{count}} tools', { count: node.capabilities?.length || 0 })}</strong></span>
             <span><small>{t('Last online')}</small><strong>{formatTime(node.last_seen_at, { compact: true })}</strong></span>
@@ -385,20 +392,30 @@ function RuntimeContent({ active, refreshToken, runtimeNodes }: {
   runtimeNodes: RuntimeNodesState;
 }) {
   const { t } = useTranslation();
+  const [mcpAddOpen, setMCPAddOpen] = useState(false);
+
+  useEffect(() => {
+    setMCPAddOpen(false);
+  }, [active, runtimeNodes.selectedNodeID]);
+
   if (active === 'workspaces') {
     return <section className="runtime-standalone-page runtime-workspaces-page">
       <WorkspacePage refreshToken={refreshToken} nodes={runtimeNodes.nodes} />
     </section>;
   }
+
   return <section className={`runtime-standalone-page runtime-${active}-page`}>
     <div className="runtime-node-bar">
       <AgentDockNodeSelector nodes={runtimeNodes.nodes} selectedNodeID={runtimeNodes.selectedNodeID} onSelect={runtimeNodes.selectNode} />
       {runtimeNodes.selectedNode && <span className={`runtime-node-status ${runtimeNodes.selectedNode.online ? 'is-online' : 'is-offline'}`}>{runtimeNodes.selectedNode.online ? t('Online') : t('Offline')}{runtimeNodes.selectedNode.os ? ` · ${runtimeNodes.selectedNode.os}/${runtimeNodes.selectedNode.arch}` : ''}</span>}
+      {active === 'mcp' && runtimeNodes.selectedNode && <button type="button" className="nx-button runtime-node-action" onClick={() => setMCPAddOpen(true)}><CirclePlus size={16} />{t('Add MCP')}</button>}
     </div>
     {!runtimeNodes.selectedNode && <AgentDockNodeRequired><button type="button" className="nx-button" onClick={() => { window.location.hash = 'settings/system'; }}>{t('Manage nodes')}</button></AgentDockNodeRequired>}
     {active === 'tasks' && runtimeNodes.selectedNode && <TaskCenterPage key={runtimeNodes.selectedNode.id} nodeID={runtimeNodes.selectedNode.id} refreshToken={refreshToken} />}
     {active === 'skills' && runtimeNodes.selectedNode && <SkillsPage key={runtimeNodes.selectedNode.id} nodeID={runtimeNodes.selectedNode.id} refreshToken={refreshToken} />}
-    {active === 'mcp' && runtimeNodes.selectedNode && <MCPPage key={runtimeNodes.selectedNode.id} nodeID={runtimeNodes.selectedNode.id} refreshToken={refreshToken} />}
+    {active === 'plugins' && runtimeNodes.selectedNode && <PluginPage key={runtimeNodes.selectedNode.id} nodeID={runtimeNodes.selectedNode.id} refreshToken={refreshToken} />}
+    {active === 'mcp' && runtimeNodes.selectedNode && <MCPPage key={runtimeNodes.selectedNode.id} nodeID={runtimeNodes.selectedNode.id} refreshToken={refreshToken} addOpen={mcpAddOpen} onAddOpenChange={setMCPAddOpen} />}
+    {active === 'diagnostics' && runtimeNodes.selectedNode && <DiagnosticsPage key={runtimeNodes.selectedNode.id} nodeID={runtimeNodes.selectedNode.id} online={runtimeNodes.selectedNode.online} refreshToken={refreshToken} />}
   </section>;
 }
 
@@ -453,7 +470,7 @@ function SystemSettingsPage({ refreshToken, runtimeNodes }: { refreshToken: numb
       <Panel icon={Activity} title={t('System')} subtitle={t('Runtime status and data locations')}>
         <SettingValue label={t('Service')} value={system.data.service || 'nexusdock'} tone={system.data.ok ? 'ok' : 'danger'} />
         <SettingValue label={t('Database')} value={system.data.database || 'unknown'} tone={system.data.database === 'ok' ? 'ok' : 'danger'} />
-        <details className="nexus-technical-details"><summary>{t('Data & version')}</summary><SettingValue label={t('Version')} value={system.data.version || 'dev'} mono /><SettingValue label={t('Revision')} value={system.data.revision || 'unknown'} mono /><SettingValue label="Schema" value={String(system.data.schema_version || 0)} /><SettingValue label={t('Nexus data')} value={system.data.nexus_data_dir || t('None')} mono /><SettingValue label={t('Recall repository')} value={system.data.recall_repo_dir || t('None')} mono /></details>
+        <section className="nexus-technical-details"><SettingValue label={t('Version')} value={system.data.version || 'dev'} mono /><SettingValue label={t('Revision')} value={system.data.revision || 'unknown'} mono /><SettingValue label="Schema" value={String(system.data.schema_version || 0)} /><SettingValue label={t('Nexus data')} value={system.data.nexus_data_dir || t('None')} mono /><SettingValue label={t('Recall repository')} value={system.data.recall_repo_dir || t('None')} mono /></section>
       </Panel>
     </section>
   </section>;

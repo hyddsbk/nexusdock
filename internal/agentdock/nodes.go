@@ -12,10 +12,10 @@ import (
 	"fmt"
 	"mime"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
+	protocol "github.com/uvwt/agentdock-protocol"
 	"github.com/uvwt/nexusdock/internal/core"
 )
 
@@ -26,8 +26,6 @@ var (
 	ErrNodeExists         = errors.New("AgentDock 设备已经配对")
 	ErrNodeDisabled       = errors.New("AgentDock 节点已停用")
 	ErrPairingCodeInvalid = errors.New("AgentDock 配对码无效或已过期")
-
-	deviceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$`)
 )
 
 type ValidationError struct{ Message string }
@@ -58,6 +56,8 @@ type PairingCode struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
+// PairInput 与 protocol.PairRequest 保持同一字段形状。HTTP 边界通过显式类型转换进入核心层，
+// 协议字段发生变化时会在编译期暴露，而不是让两份 JSON 契约静默漂移。
 type PairInput struct {
 	Code     string `json:"code"`
 	DeviceID string `json:"device_id"`
@@ -146,10 +146,10 @@ func (s *Store) Pair(ctx context.Context, input PairInput) (Node, error) {
 	if code == "" {
 		return Node{}, invalid("配对码不能为空")
 	}
-	if !deviceIDPattern.MatchString(deviceID) {
+	if !protocol.ValidDeviceID(deviceID) {
 		return Node{}, invalid("设备 ID 格式无效")
 	}
-	if name == "" || len([]rune(name)) > 100 {
+	if !protocol.ValidNodeName(name) {
 		return Node{}, invalid("节点名称必须为 1 到 100 个字符")
 	}
 
@@ -190,30 +190,35 @@ func (s *Store) Pair(ctx context.Context, input PairInput) (Node, error) {
 }
 
 func (s *Store) Update(ctx context.Context, id string, input UpdateInput) (Node, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return Node{}, invalid("节点 ID 不能为空")
+	}
 	if input.Name == nil && input.Enabled == nil {
 		return Node{}, invalid("至少提交一个需要更新的节点字段")
 	}
-	node, err := s.Get(ctx, id)
-	if err != nil {
-		return Node{}, err
-	}
+
+	updates := make([]string, 0, 3)
+	args := make([]any, 0, 4)
 	if input.Name != nil {
 		name := strings.TrimSpace(*input.Name)
-		if name == "" || len([]rune(name)) > 100 {
+		if !protocol.ValidNodeName(name) {
 			return Node{}, invalid("节点名称必须为 1 到 100 个字符")
 		}
-		node.Name = name
+		updates = append(updates, "name = ?")
+		args = append(args, name)
 	}
 	if input.Enabled != nil {
-		node.Enabled = *input.Enabled
+		enabled := 0
+		if *input.Enabled {
+			enabled = 1
+		}
+		updates = append(updates, "enabled = ?")
+		args = append(args, enabled)
 	}
-	node.UpdatedAt = s.now().UTC()
-	enabled := 0
-	if node.Enabled {
-		enabled = 1
-	}
-	result, err := s.db.ExecContext(ctx, `UPDATE agentdock_devices SET name = ?, enabled = ?, updated_at = ? WHERE id = ?`,
-		node.Name, enabled, node.UpdatedAt.Format(time.RFC3339Nano), node.ID)
+	updates = append(updates, "updated_at = ?")
+	args = append(args, s.now().UTC().Format(time.RFC3339Nano), id)
+	result, err := s.db.ExecContext(ctx, `UPDATE agentdock_devices SET `+strings.Join(updates, ", ")+` WHERE id = ?`, args...)
 	if err != nil {
 		return Node{}, fmt.Errorf("更新 AgentDock 节点: %w", err)
 	}
@@ -221,7 +226,7 @@ func (s *Store) Update(ctx context.Context, id string, input UpdateInput) (Node,
 	if changed != 1 {
 		return Node{}, ErrNodeNotFound
 	}
-	return s.Get(ctx, node.ID)
+	return s.Get(ctx, id)
 }
 
 func (s *Store) UpdateHello(ctx context.Context, nodeID string, hello Hello) (Node, error) {

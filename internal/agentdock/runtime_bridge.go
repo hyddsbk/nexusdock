@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	protocol "github.com/uvwt/agentdock-protocol"
@@ -19,6 +21,7 @@ const runtimeRequestTimeout = 8 * time.Second
 
 // ErrBridgeUnavailable 表示 Nexus 没有装配 AgentDock 连接服务（未启用节点功能），而不是某个节点离线。
 var ErrBridgeUnavailable = errors.New("AgentDock 节点连接服务不可用")
+var ErrRuntimeDiagnosticsUnsupported = errors.New("AgentDock Runtime 不支持远程运行诊断")
 
 // NodeLookupError 表示读取 Nexus 节点库失败（区别于节点不存在）。
 type NodeLookupError struct{ Err error }
@@ -52,6 +55,101 @@ func (h *Hub) invokeRuntime(ctx context.Context, nodeID, method, path string, qu
 }
 
 // RuntimeTasks 拉取节点任务列表并解析为 DTO；limit 由 Nexus 侧 UI 约束（最大 200）。
+func normalizeRuntimeDiagnosticsError(err error) error {
+	var remote *RemoteError
+	// 旧版 AgentDock 根本没有 /internal/runtime/diagnostics 路由，只会从固定的
+	// Runtime request 路径返回通用 NOT_FOUND；新版则返回 DIAGNOSTICS_UNSUPPORTED。
+	// 这里的调用 path 是常量，因此该 NOT_FOUND 可以安全解释为“版本不支持”。
+	if errors.As(err, &remote) && remote.Category == "not_found" &&
+		(remote.Code == "NOT_FOUND" || remote.Code == "DIAGNOSTICS_UNSUPPORTED") {
+		return ErrRuntimeDiagnosticsUnsupported
+	}
+	return err
+}
+
+func (h *Hub) RuntimeDiagnostics(ctx context.Context, nodeID string) ([]RuntimeDiagnosticCall, error) {
+	payload, err := h.invokeRuntime(ctx, nodeID, "GET", "/internal/runtime/diagnostics", nil, nil)
+	if err != nil {
+		return nil, normalizeRuntimeDiagnosticsError(err)
+	}
+	return parseRuntimeDiagnostics(nodeID, payload)
+}
+
+func (h *Hub) RuntimeOverview(ctx context.Context, nodeID string) (RuntimeOverview, error) {
+	payload, err := h.invokeRuntime(ctx, nodeID, http.MethodGet, "/internal/runtime/overview", nil, nil)
+	if err == nil {
+		return parseRuntimeOverview(nodeID, payload)
+	}
+	var remote *RemoteError
+	if !errors.As(err, &remote) || remote.Category != "not_found" || remote.Code != "NOT_FOUND" {
+		return RuntimeOverview{}, err
+	}
+
+	// 旧版 AgentDock 没有轻量 overview。只对明确的 NOT_FOUND 回退旧契约。
+	// 四份旧明细彼此独立，必须并发读取；否则旧设备会继续叠加四次远程往返，
+	// 甚至还多出前面的能力探测延迟。
+	var (
+		tasks     []RuntimeTaskSummary
+		taskErr   error
+		skills    []RuntimeSkillSummary
+		skillErr  error
+		servers   []RuntimeMCPServerSummary
+		mcpErr    error
+		plugins   []RuntimePluginSummary
+		pluginErr error
+		wg        sync.WaitGroup
+	)
+	wg.Add(4)
+	go func() {
+		defer wg.Done()
+		tasks, taskErr = h.RuntimeTasks(ctx, nodeID, 200)
+	}()
+	go func() {
+		defer wg.Done()
+		skills, skillErr = h.RuntimeSkills(ctx, nodeID)
+	}()
+	go func() {
+		defer wg.Done()
+		servers, mcpErr = h.RuntimeMCPServers(ctx, nodeID)
+	}()
+	go func() {
+		defer wg.Done()
+		plugins, pluginErr = h.RuntimePlugins(ctx, nodeID)
+	}()
+	wg.Wait()
+
+	if taskErr != nil {
+		return RuntimeOverview{}, taskErr
+	}
+	if skillErr != nil {
+		return RuntimeOverview{}, skillErr
+	}
+	if mcpErr != nil {
+		return RuntimeOverview{}, mcpErr
+	}
+	counts := RuntimeOverviewTaskCounts{}
+	recentCutoff := time.Now().UTC().Add(-24 * time.Hour)
+	for _, task := range tasks {
+		switch task.Status {
+		case "active":
+			counts.Active++
+			if updatedAt, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(task.UpdatedAt)); parseErr == nil && !updatedAt.Before(recentCutoff) {
+				counts.ActiveRecent24H++
+			}
+		case "completed":
+			counts.Completed++
+		case "blocked":
+			counts.Blocked++
+		}
+	}
+	return RuntimeOverview{
+		Tasks:   counts,
+		Skills:  RuntimeOverviewCount{Count: len(skills)},
+		Plugins: RuntimeOverviewPluginCount{Count: len(plugins), Available: pluginErr == nil},
+		MCP:     RuntimeOverviewCount{Count: len(servers)},
+	}, nil
+}
+
 func (h *Hub) RuntimeTasks(ctx context.Context, nodeID string, limit int) ([]RuntimeTaskSummary, error) {
 	query := url.Values{}
 	if limit > 0 {
@@ -93,8 +191,12 @@ func (h *Hub) RuntimeSkills(ctx context.Context, nodeID string) ([]RuntimeSkillS
 
 // RuntimeSkill 读取单个 Skill 的详情与文件清单。
 // 第二个返回值是上游原始响应 JSON，供 UI 的“原始响应”调试面板透传展示。
-func (h *Hub) RuntimeSkill(ctx context.Context, nodeID, skillID string) (RuntimeSkillDetail, json.RawMessage, error) {
-	payload, err := h.invokeRuntime(ctx, nodeID, http.MethodGet, "/internal/runtime/skills/"+url.PathEscape(skillID), nil, nil)
+func (h *Hub) RuntimeSkill(ctx context.Context, nodeID, skillID, skillRef string) (RuntimeSkillDetail, json.RawMessage, error) {
+	query := url.Values{}
+	if strings.TrimSpace(skillRef) != "" {
+		query.Set("skill_ref", strings.TrimSpace(skillRef))
+	}
+	payload, err := h.invokeRuntime(ctx, nodeID, http.MethodGet, "/internal/runtime/skills/"+url.PathEscape(skillID), query, nil)
 	if err != nil {
 		return RuntimeSkillDetail{}, nil, err
 	}
@@ -110,8 +212,12 @@ func (h *Hub) RuntimeSkill(ctx context.Context, nodeID, skillID string) (Runtime
 }
 
 // RuntimeSkillFile 读取 Skill 包内的文本文件内容。
-func (h *Hub) RuntimeSkillFile(ctx context.Context, nodeID, skillID, filePath string) (RuntimeSkillFileContent, error) {
-	payload, err := h.invokeRuntime(ctx, nodeID, http.MethodGet, "/internal/runtime/skills/"+skillID+"/files/"+filePath, nil, nil)
+func (h *Hub) RuntimeSkillFile(ctx context.Context, nodeID, skillID, skillRef, filePath string) (RuntimeSkillFileContent, error) {
+	query := url.Values{}
+	if strings.TrimSpace(skillRef) != "" {
+		query.Set("skill_ref", strings.TrimSpace(skillRef))
+	}
+	payload, err := h.invokeRuntime(ctx, nodeID, http.MethodGet, "/internal/runtime/skills/"+skillID+"/files/"+filePath, query, nil)
 	if err != nil {
 		return RuntimeSkillFileContent{}, err
 	}
@@ -164,5 +270,17 @@ func (h *Hub) RuntimeMCPManage(ctx context.Context, nodeID string, request json.
 // RuntimeEvolve 提交进化候选；Nexus 只关心上游是否接受，不解析响应内容。
 func (h *Hub) RuntimeEvolve(ctx context.Context, nodeID string, payload json.RawMessage) error {
 	_, err := h.invokeRuntime(ctx, nodeID, http.MethodPost, "/internal/runtime/evolve", nil, payload)
+	return err
+}
+
+// RuntimeMCPOAuthCallback 把 OAuth Provider 回到 Nexus 的一次性 code/state 原样投递给
+// 目标 AgentDock。Nexus 不保存 PKCE verifier、access token 或 refresh token；真正的
+// token exchange 仍只发生在节点本地。
+func (h *Hub) RuntimeMCPOAuthCallback(ctx context.Context, nodeID string, callback RuntimeMCPOAuthCallback) error {
+	body, err := json.Marshal(callback)
+	if err != nil {
+		return fmt.Errorf("编码 Remote MCP OAuth callback: %w", err)
+	}
+	_, err = h.invokeRuntime(ctx, nodeID, http.MethodPost, "/internal/runtime/mcp/oauth/callback", nil, body)
 	return err
 }

@@ -1,20 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { AppWindow, Cable, Copy, Eye, EyeOff, RotateCcw, ShieldCheck } from 'lucide-react';
+import { AppWindow, Cable, Copy, Eye, EyeOff, RotateCcw } from 'lucide-react';
 import { ApiError, api } from '../../api/client';
+import type { MCPAccessTokenResponse, MCPSettingsResponse, MCPSettingsUpdateRequest } from '../../api/generated';
 import Dialog from '../Dialog';
-
-type MCPTokenResponse = {
-  ok: boolean;
-  token: string;
-};
-
-type MCPSettingsResponse = MCPTokenResponse & {
-  mcp_apps_enabled: boolean;
-  persisted: boolean;
-  updated_at?: string;
-};
 
 function errorMessage(error: unknown, t: TFunction): string {
   if (error instanceof ApiError) return error.message;
@@ -80,7 +70,7 @@ export default function MCPAccessPanel({ refreshToken }: { refreshToken: number 
     setResetting(true);
     setNotice(null);
     try {
-      const result = await api<MCPTokenResponse>('/v1/settings/mcp-token/reset', { method: 'POST' });
+      const result = await api<MCPAccessTokenResponse>('/v1/settings/mcp-token/reset', { method: 'POST' });
       setToken(result.token);
       setRevealed(true);
       setResetOpen(false);
@@ -99,12 +89,13 @@ export default function MCPAccessPanel({ refreshToken }: { refreshToken: number 
     setSavingApps(true);
     setNotice(null);
     try {
+      const payload: MCPSettingsUpdateRequest = { mcp_apps_enabled: enabled };
       const result = await api<MCPSettingsResponse>('/v1/settings/mcp', {
         method: 'PUT',
-        body: JSON.stringify({ mcp_apps_enabled: enabled }),
+        body: JSON.stringify(payload),
       });
       setMCPAppsEnabled(result.mcp_apps_enabled);
-      setNotice({ tone: 'success', text: result.mcp_apps_enabled ? t('MCP Apps UI enabled.') : t('MCP Apps UI disabled.') });
+      setNotice({ tone: 'success', text: result.mcp_apps_enabled ? t('Chat cards enabled.') : t('Chat cards disabled.') });
     } catch (error) {
       setMCPAppsEnabled(previous);
       setNotice({ tone: 'error', text: errorMessage(error, t) });
@@ -136,7 +127,7 @@ export default function MCPAccessPanel({ refreshToken }: { refreshToken: number 
         </label>
       </div>
       <footer className="mcp-access-footer">
-        <div><ShieldCheck size={16} /><span><strong>{t('MCP only')}</strong><small>{t('This Token cannot access the NexusDock /v1 management API.')}</small></span></div>
+        <div className="mcp-access-authorization"><strong>Authorization</strong><code>Bearer {'<Access Token>'}</code><span>{t('Resetting immediately revokes the previous Token. OAuth clients are unaffected.')}</span></div>
         <button type="button" className="nx-button is-danger" onClick={() => setResetOpen(true)} disabled={loading || resetting}><RotateCcw size={15} />{t('Reset Token')}</button>
       </footer>
     </section>
@@ -144,17 +135,15 @@ export default function MCPAccessPanel({ refreshToken }: { refreshToken: number 
     <section className="mcp-access-card">
       <header>
         <span className="nexus-panel-icon"><AppWindow size={17} /></span>
-        <div><h3>MCP Apps UI</h3><p>{t('Control whether NexusDock publishes interactive Apps UI to MCP clients.')}</p></div>
+        <div><h3>{t('Chat cards')}</h3><p>{t('Control whether NexusDock publishes interactive chat cards to MCP clients.')}</p></div>
       </header>
       <div className="mcp-access-body">
         <label className="mcp-apps-toggle">
           <input type="checkbox" checked={mcpAppsEnabled} onChange={(event) => void updateMCPAppsEnabled(event.target.checked)} disabled={loading || savingApps} />
-          <span><strong>{t('Enable MCP Apps UI')}</strong><small>{t('Provide interactive views to clients that support MCP Apps. Tool functionality is unaffected when disabled.')}</small></span>
+          <span><strong>{t('Enable chat cards')}</strong><small>{t('Provide interactive chat cards to clients that support MCP Apps. Tool functionality is unaffected when disabled.')}</small></span>
         </label>
       </div>
     </section>
-
-    <div className="mcp-access-hint"><strong>Authorization</strong><code>Bearer {'<Access Token>'}</code><span>{t('Resetting immediately revokes the previous Token. OAuth clients are unaffected.')}</span></div>
 
     {resetOpen && <Dialog title={t('Reset MCP Token')} description={t('The current Token will become invalid immediately. Clients using it must be reconfigured.')} onClose={() => !resetting && setResetOpen(false)}>
       <div className="mcp-token-reset-dialog">

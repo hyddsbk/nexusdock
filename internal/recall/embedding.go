@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,17 +15,19 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/uvwt/nexusdock/internal/embedding"
 )
 
 const (
-	DefaultEmbeddingModel        = "BAAI/bge-m3"
-	DefaultEmbeddingTimeout      = 30 * time.Second
+	// 保留旧导出名，避免把共享默认值迁移扩大成无关调用方改动。
+	DefaultEmbeddingModel        = embedding.DefaultModel
+	DefaultEmbeddingTimeout      = embedding.DefaultTimeout
 	embeddingBatchSize           = 5
 	embeddingBatchConcurrency    = 2
 	embeddingTextMaxBytes        = 1536
 	embeddingFrontmatterMaxBytes = 512
 	embeddingHeadingsMaxBytes    = 640
-	maxEmbeddingResponseBytes    = 32 << 20
 )
 
 type EmbeddingConfig struct {
@@ -41,7 +42,7 @@ type EmbeddingService struct {
 	store     *Store
 	cfg       EmbeddingConfig
 	indexPath string
-	client    *http.Client
+	client    *embedding.Client
 	mu        sync.Mutex
 }
 
@@ -94,6 +95,19 @@ type EmbeddingIndexSummarize struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+type EmbeddingStatus struct {
+	OK         bool                     `json:"ok"`
+	Enabled    bool                     `json:"enabled"`
+	Model      string                   `json:"model"`
+	Configured bool                     `json:"configured"`
+	Endpoint   string                   `json:"endpoint,omitempty"`
+	IndexPath  string                   `json:"index_path,omitempty"`
+	Index      *EmbeddingIndexSummarize `json:"index,omitempty"`
+	Reachable  *bool                    `json:"reachable,omitempty"`
+	Reason     string                   `json:"reason,omitempty"`
+	Error      string                   `json:"error,omitempty"`
+}
+
 type embeddingIndex struct {
 	Model     string                       `json:"model"`
 	Dimension int                          `json:"dimension,omitempty"`
@@ -121,45 +135,41 @@ func NewEmbeddingService(store *Store, cfg EmbeddingConfig) *EmbeddingService {
 	if store != nil {
 		indexPath = filepath.Join(store.Root(), ".recall", "embedding-index.json")
 	}
-	return &EmbeddingService{store: store, cfg: cfg, indexPath: indexPath, client: &http.Client{Timeout: cfg.Timeout}}
+	return &EmbeddingService{store: store, cfg: cfg, indexPath: indexPath, client: embedding.NewClient(cfg.Timeout)}
 }
 
 func (s *EmbeddingService) Enabled() bool {
 	return s != nil && s.cfg.Enabled && strings.TrimSpace(s.cfg.Endpoint) != "" && s.store != nil
 }
 
-func (s *EmbeddingService) Status(ctx context.Context) map[string]any {
-	status := map[string]any{
-		"ok":         true,
-		"enabled":    false,
-		"model":      DefaultEmbeddingModel,
-		"configured": false,
-	}
+func (s *EmbeddingService) Status(ctx context.Context) EmbeddingStatus {
+	status := EmbeddingStatus{OK: true, Model: DefaultEmbeddingModel}
 	if s == nil {
-		status["reason"] = "embedding service is not configured"
+		status.Reason = "embedding service is not configured"
 		return status
 	}
-	status["enabled"] = s.Enabled()
-	status["configured"] = strings.TrimSpace(s.cfg.Endpoint) != ""
-	status["model"] = s.cfg.Model
-	status["endpoint"] = s.cfg.Endpoint
-	status["index_path"] = s.indexPath
-	idx, err := s.loadIndex()
-	if err == nil {
-		status["index"] = EmbeddingIndexSummarize{Model: idx.Model, Dimension: idx.Dimension, Count: len(idx.Documents), UpdatedAt: idx.UpdatedAt}
+	status.Enabled = s.Enabled()
+	status.Configured = strings.TrimSpace(s.cfg.Endpoint) != ""
+	status.Model = s.cfg.Model
+	status.Endpoint = s.cfg.Endpoint
+	status.IndexPath = s.indexPath
+	if idx, err := s.loadIndex(); err == nil {
+		summary := EmbeddingIndexSummarize{Model: idx.Model, Dimension: idx.Dimension, Count: len(idx.Documents), UpdatedAt: idx.UpdatedAt}
+		status.Index = &summary
 	}
-	if s.Enabled() {
-		ctx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
-		defer cancel()
-		if _, err := s.embed(ctx, []string{"health check"}); err != nil {
-			status["reachable"] = false
-			status["error"] = err.Error()
-		} else {
-			status["reachable"] = true
-		}
-	} else {
-		status["reason"] = "enable vector search and configure an endpoint in NexusDock settings"
+	if !status.Enabled {
+		status.Reason = "enable vector search and configure an endpoint in NexusDock settings"
+		return status
 	}
+
+	ctx, cancel := context.WithTimeout(ctx, s.cfg.Timeout)
+	defer cancel()
+	reachable := true
+	if _, err := s.embed(ctx, []string{"health check"}); err != nil {
+		reachable = false
+		status.Error = err.Error()
+	}
+	status.Reachable = &reachable
 	return status
 }
 
@@ -167,6 +177,8 @@ func (s *EmbeddingService) Reindex(ctx context.Context, req EmbeddingReindexRequ
 	if !s.Enabled() {
 		return EmbeddingReindexResult{}, errors.New("embedding service is disabled or endpoint is empty")
 	}
+	s.store.embeddingMu.Lock()
+	defer s.store.embeddingMu.Unlock()
 	prefix := strings.Trim(filepath.ToSlash(strings.TrimSpace(req.Prefix)), "/")
 	maxEntries := req.MaxEntries
 	if maxEntries <= 0 || maxEntries > 2000 {
@@ -493,58 +505,34 @@ func (s *EmbeddingService) embed(ctx context.Context, texts []string) ([][]float
 	if len(texts) == 0 {
 		return [][]float64{}, nil
 	}
-	endpoint := strings.TrimSpace(s.cfg.Endpoint)
-	if endpoint == "" {
-		return nil, errors.New("embedding endpoint is empty")
-	}
-	endpointURL, payload, err := embeddingRequest(endpoint, s.cfg.Model, texts)
+	endpointURL, err := embeddingEndpoint(s.cfg.Endpoint)
 	if err != nil {
 		return nil, err
 	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("encode embedding request: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(body))
+	vectors, err := s.client.Embed(ctx, embedding.Request{
+		URL: endpointURL, Model: s.cfg.Model, APIKey: s.cfg.APIKey, Inputs: texts,
+	})
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if token := strings.TrimSpace(s.cfg.APIKey); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	res, err := s.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(res.Body, maxEmbeddingResponseBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("read embedding response: %w", err)
-	}
-	if len(data) > maxEmbeddingResponseBytes {
-		return nil, fmt.Errorf("embedding response exceeds %d bytes", maxEmbeddingResponseBytes)
-	}
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, fmt.Errorf("embedding endpoint returned HTTP %d: %s", res.StatusCode, truncateUTF8(strings.TrimSpace(string(data)), 4096))
-	}
-	return parseEmbeddingResponse(data)
+	return vectors, nil
 }
 
-func embeddingRequest(endpoint, model string, texts []string) (string, map[string]any, error) {
+// embeddingEndpoint 保留 Recall 的历史 endpoint 规则：仅 URL path 为空时补
+// /v1/embeddings；用户显式配置的任意非空 path 原样调用。
+func embeddingEndpoint(endpoint string) (string, error) {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return "", errors.New("embedding endpoint is empty")
+	}
 	u, err := url.Parse(endpoint)
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
-	path := strings.TrimRight(u.Path, "/")
-	if path == "" {
+	if strings.TrimRight(u.Path, "/") == "" {
 		u.Path = "/v1/embeddings"
-		return u.String(), map[string]any{"model": model, "input": texts}, nil
 	}
-	if strings.HasSuffix(path, "/embed") {
-		return u.String(), map[string]any{"model": model, "input": texts}, nil
-	}
-	return u.String(), map[string]any{"model": model, "input": texts}, nil
+	return u.String(), nil
 }
 
 func parseEmbeddingResponse(data []byte) ([][]float64, error) {
@@ -552,66 +540,11 @@ func parseEmbeddingResponse(data []byte) ([][]float64, error) {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
 	}
-	if dataValue, ok := raw["data"]; ok {
-		items, ok := dataValue.([]any)
-		if !ok {
-			return nil, errors.New("embedding response data is not an array")
-		}
-		vectors := make([][]float64, len(items))
-		indexMode := -1
-		for position, item := range items {
-			obj, ok := item.(map[string]any)
-			if !ok {
-				return nil, errors.New("embedding response item is not an object")
-			}
-			vector, err := vectorFromAny(obj["embedding"])
-			if err != nil {
-				return nil, err
-			}
-			rawIndex, hasIndex := obj["index"]
-			mode := 0
-			if hasIndex {
-				mode = 1
-			}
-			if indexMode == -1 {
-				indexMode = mode
-			} else if indexMode != mode {
-				return nil, errors.New("embedding response mixes indexed and unindexed items")
-			}
-			target := position
-			if hasIndex {
-				index, ok := rawIndex.(float64)
-				if !ok || index != math.Trunc(index) || index < 0 || int(index) >= len(items) {
-					return nil, fmt.Errorf("embedding response index is invalid: %v", rawIndex)
-				}
-				target = int(index)
-			}
-			if vectors[target] != nil {
-				return nil, fmt.Errorf("embedding response index %d is duplicated", target)
-			}
-			vectors[target] = vector
-		}
-		for index, vector := range vectors {
-			if vector == nil {
-				return nil, fmt.Errorf("embedding response index %d is missing", index)
-			}
-		}
-		return vectors, nil
+	if _, ok := raw["data"]; ok {
+		return embedding.ParseResponse(data)
 	}
-	if values, ok := raw["embeddings"]; ok {
-		items, ok := values.([]any)
-		if !ok {
-			return nil, errors.New("embedding response embeddings is not an array")
-		}
-		vectors := make([][]float64, 0, len(items))
-		for _, item := range items {
-			vector, err := vectorFromAny(item)
-			if err != nil {
-				return nil, err
-			}
-			vectors = append(vectors, vector)
-		}
-		return vectors, nil
+	if _, ok := raw["embeddings"]; ok {
+		return embedding.ParseResponse(data)
 	}
 	if value, ok := raw["embedding"]; ok {
 		vector, err := vectorFromAny(value)
@@ -643,7 +576,16 @@ func vectorFromAny(value any) ([]float64, error) {
 }
 
 func (s *EmbeddingService) loadIndex() (embeddingIndex, error) {
-	data, err := os.ReadFile(s.indexPath)
+	root, err := os.OpenRoot(s.store.root)
+	if err != nil {
+		return embeddingIndex{}, err
+	}
+	defer root.Close()
+	rel, err := filepath.Rel(s.store.root, s.indexPath)
+	if err != nil {
+		return embeddingIndex{}, err
+	}
+	data, err := root.ReadFile(rel)
 	if err != nil {
 		return embeddingIndex{}, err
 	}
@@ -698,14 +640,11 @@ func (s *EmbeddingService) writeIndex(idx embeddingIndex) error {
 	if err := validateEmbeddingIndex(idx); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(s.indexPath), 0o700); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(idx, "", "  ")
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(s.indexPath, append(data, '\n'), 0o600)
+	return s.store.atomicWriteFile(s.indexPath, append(data, '\n'), 0o600)
 }
 
 func embeddingText(mem Recall) string {

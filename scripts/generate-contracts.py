@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NexusDock HTTP contract definitions used by scripts/check-contracts.py."""
+"""NexusDock HTTP contract source used by validation and frontend type generation."""
 
 from __future__ import annotations
 
@@ -774,7 +774,9 @@ def build_schemas() -> dict[str, dict[str, Any]]:
             "count": scalar("integer", "列表项数。", minimum=0),
             "notes_count": scalar("integer", "明文笔记数。", minimum=0),
             "missing_encrypted": array("缺失的 age 密文路径。", scalar("string", "密文路径。")),
-            "encrypted_backup_ok": scalar("boolean", "每条明文是否都有密文。"),
+            "stale_encrypted": array("与当前明文不一致或无法校验的 age 密文路径。", scalar("string", "密文路径。")),
+            "orphaned_encrypted": array("没有对应明文的孤儿 age 密文路径。", scalar("string", "密文路径。")),
+            "encrypted_backup_ok": scalar("boolean", "明文与 age 密文是否一一对应且内容一致。"),
             "plaintext_git_ignored": scalar("boolean", "notes/ 是否由仓库规则忽略。"),
             "keys_git_ignored": scalar("boolean", ".keys/ 是否由仓库规则忽略。"),
         },
@@ -839,6 +841,44 @@ def build_schemas() -> dict[str, dict[str, Any]]:
         },
         ("code", "device_id", "name"),
     )
+    schemas["RuntimeDiagnosticStage"] = obj(
+        "单次运行调用中的稳定阶段耗时。",
+        {
+            "name": scalar("string", "稳定阶段名称；未知新阶段保持原值以支持前向兼容。", minLength=1),
+            "started_offset_ms": scalar("number", "相对调用开始时间的毫秒偏移。", minimum=0),
+            "duration_ms": scalar("number", "阶段耗时毫秒。", minimum=0),
+            "success": scalar("boolean", "阶段是否成功。"),
+        },
+        ("name", "started_offset_ms", "duration_ms", "success"),
+    )
+    schemas["RuntimeDiagnosticCall"] = obj(
+        "AgentDock 内存中最近一次运行调用的零 Payload 诊断视图。",
+        {
+            "id": scalar("string", "节点进程内单调递增的调用 ID。"),
+            "tool": scalar("string", "工具名称。"),
+            "source": enum("调用来源。", ["internal", "mcp", "nexus"]),
+            "trace_id": scalar("string", "存在上游 W3C Trace Context 时的 Trace ID。"),
+            "started_at": TIMESTAMP,
+            "duration_ms": scalar("number", "调用总耗时毫秒。", minimum=0),
+            "success": scalar("boolean", "调用是否成功。"),
+            "error_code": scalar("string", "稳定错误码。"),
+            "error_category": scalar("string", "稳定错误分类。"),
+            "stages": array("内部稳定阶段耗时。", ref("RuntimeDiagnosticStage")),
+        },
+        ("id", "tool", "source", "started_at", "duration_ms", "success"),
+    )
+    schemas["RuntimeDiagnosticsResponse"] = obj(
+        "指定在线 AgentDock 节点的最近运行调用；数据仅按需从节点内存读取。",
+        {
+            "ok": scalar("boolean", "请求是否成功。"),
+            "node_id": scalar("string", "AgentDock 节点 ID。"),
+            "items": array("最近调用，按最新优先。", ref("RuntimeDiagnosticCall")),
+            "count": scalar("integer", "返回调用数量。", minimum=0),
+            "source": scalar("string", "固定为 agentdock-runtime-api。"),
+        },
+        ("ok", "node_id", "items", "count", "source"),
+    )
+
     schemas["AgentDockNodeUpdateRequest"] = obj(
         "更新 AgentDock 节点显示信息或启用状态。",
         {
@@ -993,6 +1033,7 @@ def build_openapi(schemas: dict[str, Any]) -> dict[str, Any]:
         "RuntimeSkillId": path_param("skillID", "AgentDock Runtime skill ID。", uuid=False),
         "RuntimeSkillFilePath": path_param("filePath", "AgentDock Runtime Skill 文件相对路径。", uuid=False),
         "RuntimeMCPName": path_param("name", "AgentDock 动态 MCP 服务名称。", uuid=False),
+        "RuntimePluginName": path_param("name", "AgentDock 已安装 Plugin 名称。", uuid=False),
         "WorkflowTemplateId": path_param("templateID", "Nexus 工作流模板 ID。", uuid=False),
         "WorkflowTemplateVersion": path_param("version", "Nexus 工作流模板版本。", uuid=False),
     }
@@ -1294,6 +1335,15 @@ def build_openapi(schemas: dict[str, Any]) -> dict[str, Any]:
         },
         "/v1/runtime/nodes/{nodeID}/overview": {"get": operation("getRuntimeOverview", "读取指定 AgentDock 节点的 Runtime 概览", params=[p("RuntimeNodeId")])},
         "/v1/runtime/nodes/{nodeID}/status": {"get": operation("getRuntimeNodeStatus", "读取指定 AgentDock 节点的健康、兼容、逻辑能力与并发状态", params=[p("RuntimeNodeId")])},
+        "/v1/runtime/nodes/{nodeID}/diagnostics": {
+            "get": operation(
+                "getRuntimeDiagnostics",
+                "按需读取指定在线 AgentDock 节点的最近运行诊断",
+                params=[p("RuntimeNodeId")],
+                success=ok(ref("RuntimeDiagnosticsResponse")),
+                additional_success={"501": error},
+            )
+        },
         "/v1/runtime/nodes/{nodeID}/tasks": {
             "get": operation(
                 "listRuntimeTasks",
@@ -1311,13 +1361,16 @@ def build_openapi(schemas: dict[str, Any]) -> dict[str, Any]:
             "delete": operation("deleteRuntimeTask", "删除指定 AgentDock 节点的任务", params=[p("RuntimeNodeId"), p("RuntimeTaskId")]),
         },
         "/v1/runtime/nodes/{nodeID}/skills": {"get": operation("listRuntimeSkills", "列出指定 AgentDock 节点的 Skill", params=[p("RuntimeNodeId")])},
-        "/v1/runtime/nodes/{nodeID}/skills/{source}/{skillID}": {"get": operation("getRuntimeSkill", "读取指定 AgentDock 节点的 Skill 详情", params=[p("RuntimeNodeId"), p("RuntimeSkillSource"), p("RuntimeSkillId")])},
-        "/v1/runtime/nodes/{nodeID}/skills/{source}/{skillID}/files/{filePath}": {"get": operation("getRuntimeSkillFile", "读取指定 AgentDock 节点的 Skill 文件", params=[p("RuntimeNodeId"), p("RuntimeSkillSource"), p("RuntimeSkillId"), p("RuntimeSkillFilePath")])},
+        "/v1/runtime/nodes/{nodeID}/skills/{source}/{skillID}": {"get": operation("getRuntimeSkill", "读取指定 AgentDock 节点的 Skill 详情", params=[p("RuntimeNodeId"), p("RuntimeSkillSource"), p("RuntimeSkillId"), q("skill_ref", "AgentDock 返回的精确 Skill 引用；同名不同来源时用于无歧义解析。")])},
+        "/v1/runtime/nodes/{nodeID}/skills/{source}/{skillID}/files/{filePath}": {"get": operation("getRuntimeSkillFile", "读取指定 AgentDock 节点的 Skill 文件", params=[p("RuntimeNodeId"), p("RuntimeSkillSource"), p("RuntimeSkillId"), p("RuntimeSkillFilePath"), q("skill_ref", "AgentDock 返回的精确 Skill 引用；同名不同来源时用于无歧义解析。")])},
+        "/v1/runtime/nodes/{nodeID}/plugins": {"get": operation("listRuntimePlugins", "列出指定 AgentDock 节点的已安装 Plugin", params=[p("RuntimeNodeId")])},
+        "/v1/runtime/nodes/{nodeID}/plugins/{name}": {"get": operation("getRuntimePlugin", "读取指定 AgentDock 节点的 Plugin 详情", params=[p("RuntimeNodeId"), p("RuntimePluginName")])},
         "/v1/runtime/nodes/{nodeID}/mcp": {
             "get": operation("listRuntimeMCPServers", "列出指定 AgentDock 节点的动态 MCP 服务", params=[p("RuntimeNodeId")]),
             "post": operation("manageRuntimeMCPServer", "管理指定 AgentDock 节点的动态 MCP 服务", params=[p("RuntimeNodeId")], request=body()),
         },
         "/v1/runtime/nodes/{nodeID}/mcp/{name}": {"get": operation("getRuntimeMCPServer", "读取指定 AgentDock 节点的动态 MCP 服务", params=[p("RuntimeNodeId"), p("RuntimeMCPName")])},
+        "/v1/runtime/nodes/{nodeID}/mcp/{name}/authorize": {"post": operation("authorizeRuntimeMCPServer", "通过当前 Nexus 浏览器为指定 AgentDock 节点的 Remote MCP 发起 OAuth 授权", params=[p("RuntimeNodeId"), p("RuntimeMCPName")])},
         "/v1/runtime/nodes/{nodeID}/mcp/{name}/environment": {"get": operation("getRuntimeMCPEnvironment", "读取指定 AgentDock 节点的 MCP 隔离环境元数据", params=[p("RuntimeNodeId"), p("RuntimeMCPName")])},
         "/v1/workflow-templates": {
             "get": operation(
@@ -1350,3 +1403,11 @@ def build_openapi(schemas: dict[str, Any]) -> dict[str, Any]:
         "paths": paths,
         "components": {"parameters": parameters, "schemas": schemas},
     }
+
+
+if __name__ == "__main__":
+    import json
+    import sys
+
+    json.dump(build_openapi(build_schemas()), sys.stdout, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    sys.stdout.write("\n")

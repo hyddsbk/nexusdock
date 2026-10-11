@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -56,15 +57,19 @@ func TestArtifactSigningSecretIsAtomicAndSecure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := dirInfo.Mode().Perm(); got != 0o700 {
-		t.Fatalf("secret dir mode = %o, want 700", got)
+	if runtime.GOOS != "windows" {
+		if got := dirInfo.Mode().Perm(); got != 0o700 {
+			t.Fatalf("secret dir mode = %o, want 700", got)
+		}
 	}
 	fileInfo, err := os.Stat(secretPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := fileInfo.Mode().Perm(); got != 0o600 {
-		t.Fatalf("secret file mode = %o, want 600", got)
+	if runtime.GOOS != "windows" {
+		if got := fileInfo.Mode().Perm(); got != 0o600 {
+			t.Fatalf("secret file mode = %o, want 600", got)
+		}
 	}
 	raw, err := os.ReadFile(secretPath)
 	if err != nil {

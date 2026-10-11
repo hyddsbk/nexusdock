@@ -20,7 +20,10 @@ func newGatewayTestServer(t *testing.T, store *agentdock.Store) *Server {
 	server := &Server{
 		agentDock:    store,
 		agentDockHub: agentdock.NewHub(store),
-		mcpServer:    mcpsdk.NewServer(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil),
+		mcp: &mcpGateway{
+			server:    mcpsdk.NewServer(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil),
+			resources: make(map[string]struct{}),
+		},
 	}
 	if store != nil {
 		server.publishedToolBridge = agentdock.NewPublishedToolBridge(store, slog.Default())
@@ -30,11 +33,11 @@ func newGatewayTestServer(t *testing.T, store *agentdock.Store) *Server {
 }
 
 func TestInitializeMCPGatewayAdvertisesFixedInstructions(t *testing.T) {
-	server := &Server{mcpResources: make(map[string]struct{})}
+	server := &Server{}
 	server.initializeMCPGateway()
 
 	clientTransport, serverTransport := mcpsdk.NewInMemoryTransports()
-	serverSession, err := server.mcpServer.Connect(t.Context(), serverTransport, nil)
+	serverSession, err := server.mcp.server.Connect(t.Context(), serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +66,9 @@ func TestInitializeMCPGatewayAdvertisesFixedInstructions(t *testing.T) {
 		if tool.Name == "node_list" {
 			t.Fatal("tools/list still exposes node_list")
 		}
+		if tool.Name == "workspace_context" {
+			t.Fatal("workspace_context must not exist without an AgentDock provider")
+		}
 		if _, expected := central[tool.Name]; !expected {
 			continue
 		}
@@ -70,13 +76,54 @@ func TestInitializeMCPGatewayAdvertisesFixedInstructions(t *testing.T) {
 		input := tool.InputSchema.(map[string]any)
 		properties := input["properties"].(map[string]any)
 		if _, hasNodeID := properties["node_id"]; hasNodeID {
-			t.Fatalf("central tool %s unexpectedly requires node_id: %#v", tool.Name, input)
+			t.Fatalf("fleet-owned central tool %s unexpectedly requires node_id: %#v", tool.Name, input)
 		}
 	}
 	for name, found := range central {
 		if !found {
 			t.Fatalf("tools/list missing central tool %s", name)
 		}
+	}
+}
+
+func TestCentralToolSchemasAreEnforcedAtRuntime(t *testing.T) {
+	server := &Server{}
+	server.initializeMCPGateway()
+
+	clientTransport, serverTransport := mcpsdk.NewInMemoryTransports()
+	serverSession, err := server.mcp.server.Connect(t.Context(), serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverSession.Close()
+
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "nexusdock-schema-test", Version: "1"}, nil)
+	clientSession, err := client.Connect(t.Context(), clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientSession.Close()
+
+	tests := []struct {
+		name string
+		tool string
+		args map[string]any
+	}{
+		{name: "required", tool: "recall_search", args: map[string]any{}},
+		{name: "enum", tool: "recall_search", args: map[string]any{"query": "memory", "kind": "unsupported"}},
+		{name: "bounds", tool: "private_note_manage", args: map[string]any{"action": "search", "query": "secret", "max_results": 101}},
+		{name: "additional properties", tool: "agentdock_context", args: map[string]any{"unexpected": true}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := clientSession.CallTool(t.Context(), &mcpsdk.CallToolParams{Name: test.tool, Arguments: test.args})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result == nil || !result.IsError {
+				t.Fatalf("invalid %s arguments were accepted: %#v", test.tool, result)
+			}
+		})
 	}
 }
 
@@ -110,7 +157,7 @@ func TestRecallUpdateFactPreviewsAndWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := &Server{store: store}
-	preview, err := server.updateRecallFacts(t.Context(), "profile.md", map[string]any{"key": "editor", "value": "new"})
+	preview, err := updateRecallFactsForTest(t, server, t.Context(), "profile.md", map[string]any{"key": "editor", "value": "new"})
 	if err != nil || preview["dry_run"] != true {
 		t.Fatalf("preview=%#v err=%v", preview, err)
 	}
@@ -118,7 +165,7 @@ func TestRecallUpdateFactPreviewsAndWrites(t *testing.T) {
 	if strings.Contains(unchanged.Content, "editor: new") {
 		t.Fatal("preview mutated Recall")
 	}
-	result, err := server.updateRecallFacts(t.Context(), "profile.md", map[string]any{"key": "editor", "value": "new", "confirmed": true})
+	result, err := updateRecallFactsForTest(t, server, t.Context(), "profile.md", map[string]any{"key": "editor", "value": "new", "confirmed": true})
 	if err != nil || result["written"] != true {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}

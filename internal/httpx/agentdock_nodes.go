@@ -5,20 +5,26 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/go-chi/chi/v5"
+	protocol "github.com/uvwt/agentdock-protocol"
 	"github.com/uvwt/nexusdock/internal/agentdock"
 	"github.com/uvwt/nexusdock/internal/core"
 )
 
-func (s *Server) registerAgentDockNodeRoutes(mux *http.ServeMux, protected func(http.HandlerFunc) http.HandlerFunc) {
-	mux.HandleFunc("GET /v1/runtime/nodes", protected(s.agentDockNodeList))
-	mux.HandleFunc("POST /v1/runtime/nodes/pairing-codes", protected(s.agentDockPairingCodeCreate))
-	mux.HandleFunc("GET /v1/runtime/nodes/{nodeID}", protected(s.agentDockNodeGet))
-	mux.HandleFunc("PATCH /v1/runtime/nodes/{nodeID}", protected(s.agentDockNodeUpdate))
-	mux.HandleFunc("DELETE /v1/runtime/nodes/{nodeID}", protected(s.agentDockNodeDelete))
+func (s *Server) registerAgentDockAdminRoutes(r chi.Router) {
+	r.Get("/v1/runtime/nodes", s.agentDockNodeList)
+	r.Post("/v1/runtime/nodes/pairing-codes", s.agentDockPairingCodeCreate)
+	r.Get("/v1/runtime/nodes/{nodeID}", s.agentDockNodeGet)
+	r.Patch("/v1/runtime/nodes/{nodeID}", s.agentDockNodeUpdate)
+	r.Delete("/v1/runtime/nodes/{nodeID}", s.agentDockNodeDelete)
+}
 
+func (s *Server) registerAgentDockConnectionRoutes(r chi.Router) {
 	// 配对码和 Device Token 是这两个入口各自的身份边界，不能套用浏览器会话认证。
-	mux.HandleFunc("POST /v1/nodes/pair", s.agentDockNodePair)
-	mux.HandleFunc("GET /v1/nodes/connect", s.agentDockNodeConnect)
+	// 路径保留字面量供 contracts 静态扫描；routes_test 会使用 protocol 常量命中真实 Router，
+	// 因此协议路径一旦变化会由回归测试立即暴露，而不是让两份路径静默漂移。
+	r.Post("/v1/nodes/pair", s.agentDockNodePair)
+	r.Get("/v1/nodes/connect", s.agentDockNodeConnect)
 }
 
 func (s *Server) agentDockNodeList(w http.ResponseWriter, r *http.Request) {
@@ -51,39 +57,38 @@ func (s *Server) agentDockPairingCodeCreate(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) agentDockNodePair(w http.ResponseWriter, r *http.Request) {
-	if s.agentDock == nil || s.auth == nil {
+	if s.agentDock == nil || !s.access.configured() {
 		writeError(w, http.StatusServiceUnavailable, "AGENTDOCK_PAIRING_UNAVAILABLE", "AgentDock 配对服务不可用")
 		return
 	}
-	var request agentdock.PairInput
+	var request protocol.PairRequest
 	if !decodeJSON(w, r, &request) {
 		return
 	}
-	node, err := s.agentDock.Pair(r.Context(), request)
+	node, err := s.agentDock.Pair(r.Context(), agentdock.PairInput(request))
 	if err != nil {
 		writeAgentDockNodeError(w, err)
 		return
 	}
 	// Device Token 只表达固定设备身份，不承载可配置权限集合。
-	issued, err := s.auth.IssueToken(r.Context(), core.Actor{Type: core.ActorDevice, ID: node.ID}, "device_token", nil, 0)
+	token, err := s.access.issueDeviceToken(r.Context(), node.ID)
 	if err != nil {
 		_ = s.agentDock.Delete(r.Context(), node.ID)
 		writeError(w, http.StatusInternalServerError, "AGENTDOCK_DEVICE_TOKEN_FAILED", "无法签发 AgentDock Device Token")
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"ok": true, "node": node, "device_token": issued.Token,
-		"connect_path": "/v1/nodes/connect",
+		"ok": true, "node": node, "device_token": token,
+		"connect_path": protocol.ConnectPath,
 	})
 }
 
 func (s *Server) agentDockNodeConnect(w http.ResponseWriter, r *http.Request) {
-	if s.auth == nil || s.agentDockHub == nil {
+	if !s.access.configured() || s.agentDockHub == nil {
 		writeError(w, http.StatusServiceUnavailable, "AGENTDOCK_CONNECTION_UNAVAILABLE", "AgentDock 节点连接服务不可用")
 		return
 	}
-	token := bearerToken(r.Header.Get("Authorization"))
-	principal, err := s.auth.Authenticate(r.Context(), token)
+	nodeID, err := s.access.authenticateDeviceToken(r.Context(), r.Header.Get("Authorization"))
 	if err != nil {
 		switch core.ErrorCodeOf(err) {
 		case core.CodeAuthRequired, core.CodeInvalidToken, core.CodeTokenRevoked:
@@ -96,11 +101,7 @@ func (s *Server) agentDockNodeConnect(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if principal.Actor.Type != core.ActorDevice || principal.TokenKind != "device_token" {
-		writeError(w, http.StatusUnauthorized, "INVALID_DEVICE_TOKEN", "AgentDock Device Token 无效")
-		return
-	}
-	if err := s.agentDockHub.Accept(w, r, principal.Actor.ID); err != nil {
+	if err := s.agentDockHub.Accept(w, r, nodeID, s.cfg.PublicURL); err != nil {
 		// WebSocket Upgrade 成功后不能再写 HTTP 响应；连接端会收到关闭事件并重连。
 		return
 	}

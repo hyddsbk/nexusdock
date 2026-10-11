@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -12,12 +13,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/uvwt/nexusdock/internal/agentdock"
 )
 
 const (
 	runtimeTaskListLimit = 200
-	recentTaskWindow     = 24 * time.Hour
 )
 
 // 以下结构体是 Runtime 视图的 UI API JSON 形状。字段值全部来自 internal/agentdock
@@ -65,13 +66,15 @@ type runtimeTaskEvent struct {
 }
 
 type runtimeTaskFinalReview struct {
-	Status         string   `json:"status"`
-	Summary        string   `json:"summary,omitempty"`
-	VerifiedFacts  []string `json:"verified_facts,omitempty"`
-	OpenRisks      []string `json:"open_risks,omitempty"`
-	MissingChecks  []string `json:"missing_checks,omitempty"`
-	ReviewRevision string   `json:"review_revision"`
-	ReviewedAt     string   `json:"reviewed_at,omitempty"`
+	IntentSpec        *agentdock.RuntimeOutcomeAxis `json:"intent_spec,omitempty"`
+	EngineeringPolicy *agentdock.RuntimeOutcomeAxis `json:"engineering_policy,omitempty"`
+	Status            string                        `json:"status"`
+	Summary           string                        `json:"summary,omitempty"`
+	VerifiedFacts     []string                      `json:"verified_facts,omitempty"`
+	OpenRisks         []string                      `json:"open_risks,omitempty"`
+	MissingChecks     []string                      `json:"missing_checks,omitempty"`
+	ReviewRevision    string                        `json:"review_revision"`
+	ReviewedAt        string                        `json:"reviewed_at,omitempty"`
 }
 
 type runtimeTaskDetail struct {
@@ -84,22 +87,21 @@ type runtimeTaskDetail struct {
 }
 
 type runtimeSkillSummary struct {
-	ID            string            `json:"id"`
-	Title         string            `json:"title"`
-	Source        string            `json:"source"`
-	Path          string            `json:"path"`
-	Description   string            `json:"description,omitempty"`
-	UpdatedAt     string            `json:"updated_at"`
-	FileCount     int               `json:"file_count"`
-	Status        string            `json:"status"`
-	ActiveVersion string            `json:"active_version,omitempty"`
-	Versions      []string          `json:"versions,omitempty"`
-	Channels      map[string]string `json:"channels,omitempty"`
+	ID            string `json:"id"`
+	Title         string `json:"title"`
+	Source        string `json:"source"`
+	Path          string `json:"path"`
+	Description   string `json:"description"`
+	FileCount     int    `json:"file_count"`
+	Status        string `json:"status"`
+	SkillRef      string `json:"skill_ref"`
+	SourceType    string `json:"source_type"`
+	PluginName    string `json:"plugin_name,omitempty"`
+	ContentDigest string `json:"content_digest"`
 }
 
 type runtimeSkillDetail struct {
 	runtimeSkillSummary
-	Root string `json:"root"`
 	// RuntimeState 是上游 Skill 详情的原始 JSON，供 UI 的“原始响应”调试面板透传展示；
 	// Nexus 不解读其内容，因此保留 RawMessage 而不是映射成结构体。
 	RuntimeState json.RawMessage    `json:"runtime_state,omitempty"`
@@ -122,61 +124,63 @@ type runtimeSkillFileContent struct {
 	Truncated bool   `json:"truncated"`
 }
 
-func (s *Server) registerRuntimeRoutes(mux *http.ServeMux, protected func(http.HandlerFunc) http.HandlerFunc) {
-	s.registerAgentDockNodeRoutes(mux, protected)
-	s.registerRuntimeWorkspaceRoutes(mux, protected)
-	s.registerRuntimeAuditRoutes(mux, protected)
-	mux.HandleFunc("GET /v1/runtime/nodes/{nodeID}/overview", protected(s.runtimeOverview))
-	mux.HandleFunc("GET /v1/runtime/nodes/{nodeID}/status", protected(s.runtimeNodeStatus))
-	mux.HandleFunc("GET /v1/runtime/nodes/{nodeID}/tasks", protected(s.runtimeTasks))
-	mux.HandleFunc("GET /v1/runtime/nodes/{nodeID}/tasks/{fileName}", protected(s.runtimeTaskDetail))
-	mux.HandleFunc("DELETE /v1/runtime/nodes/{nodeID}/tasks/{fileName}", protected(s.runtimeDeleteTask))
-	mux.HandleFunc("GET /v1/runtime/nodes/{nodeID}/skills", protected(s.runtimeSkills))
-	mux.HandleFunc("GET /v1/runtime/nodes/{nodeID}/skills/{source}/{skillID}/files/{filePath...}", protected(s.runtimeSkillFile))
-	mux.HandleFunc("GET /v1/runtime/nodes/{nodeID}/skills/{source}/{skillID}", protected(s.runtimeSkillDetail))
-	s.registerRuntimeMCPRoutes(mux, protected)
+func (s *Server) registerRuntimeRoutes(r chi.Router) {
+	s.registerAgentDockAdminRoutes(r)
+	s.registerRuntimeWorkspaceRoutes(r)
+	s.registerRuntimeAuditRoutes(r)
+	r.Get("/v1/runtime/nodes/{nodeID}/overview", s.runtimeOverview)
+	r.Get("/v1/runtime/nodes/{nodeID}/status", s.runtimeNodeStatus)
+	r.Get("/v1/runtime/nodes/{nodeID}/diagnostics", s.runtimeDiagnostics)
+	r.Get("/v1/runtime/nodes/{nodeID}/tasks", s.runtimeTasks)
+	r.Get("/v1/runtime/nodes/{nodeID}/tasks/{fileName}", s.runtimeTaskDetail)
+	r.Delete("/v1/runtime/nodes/{nodeID}/tasks/{fileName}", s.runtimeDeleteTask)
+	r.Get("/v1/runtime/nodes/{nodeID}/skills", s.runtimeSkills)
+	r.Get("/v1/runtime/nodes/{nodeID}/skills/{source}/{skillID}/files/*", withWildcardPathValue("filePath", s.runtimeSkillFile))
+	r.Get("/v1/runtime/nodes/{nodeID}/skills/{source}/{skillID}", s.runtimeSkillDetail)
+	s.registerRuntimePluginRoutes(r)
+	s.registerRuntimeMCPRoutes(r)
+}
+
+func (s *Server) runtimeDiagnostics(w http.ResponseWriter, r *http.Request) {
+	nodeID := r.PathValue("nodeID")
+	calls, err := s.agentDockHub.RuntimeDiagnostics(r.Context(), nodeID)
+	if err != nil {
+		if errors.Is(err, agentdock.ErrRuntimeDiagnosticsUnsupported) {
+			writeJSON(w, http.StatusNotImplemented, map[string]any{
+				"ok": false, "available": false, "source": "agentdock-runtime-api",
+				"error": map[string]any{
+					"code":    "AGENTDOCK_DIAGNOSTICS_UNSUPPORTED",
+					"message": "当前 AgentDock 版本不支持远程运行诊断，请升级 AgentDock。",
+				},
+			})
+			return
+		}
+		writeRuntimeUnavailable(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "node_id": nodeID, "items": calls, "count": len(calls), "source": "agentdock-runtime-api",
+	})
 }
 
 func (s *Server) runtimeOverview(w http.ResponseWriter, r *http.Request) {
 	nodeID := r.PathValue("nodeID")
-	tasks, taskErr := s.agentDockHub.RuntimeTasks(r.Context(), nodeID, runtimeTaskListLimit)
-	skills, skillErr := s.agentDockHub.RuntimeSkills(r.Context(), nodeID)
-	servers, mcpErr := s.agentDockHub.RuntimeMCPServers(r.Context(), nodeID)
-	// 概览只展示前 6 个 Skill，先按安装名排序保证结果稳定。
-	sort.SliceStable(skills, func(i, j int) bool { return skills[i].Skill < skills[j].Skill })
-	counts := map[string]int{"active": 0, "completed": 0, "blocked": 0, "active_recent_24h": 0}
-	recentCutoff := time.Now().UTC().Add(-recentTaskWindow)
-	for _, task := range tasks {
-		counts[task.Status]++
-		if task.Status == "active" && taskUpdatedSince(task.UpdatedAt, recentCutoff) {
-			counts["active_recent_24h"]++
-		}
+	overview, err := s.agentDockHub.RuntimeOverview(r.Context(), nodeID)
+	if err != nil {
+		writeRuntimeUnavailable(w, err)
+		return
 	}
-	skillItems := make([]runtimeSkillSummary, 0, len(skills))
-	for _, skill := range skills {
-		skillItems = append(skillItems, runtimeSkillSummaryView(skill))
-	}
-	payload := map[string]any{
-		"ok":         taskErr == nil && skillErr == nil && mcpErr == nil,
-		"tasks":      counts,
-		"skills":     map[string]any{"count": len(skillItems), "items": firstSkills(skillItems, 6)},
-		"mcp":        map[string]any{"count": len(servers)},
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":         true,
+		"tasks":      overview.Tasks,
+		"skills":     overview.Skills,
+		"mcp":        overview.MCP,
+		"plugins":    overview.Plugins,
 		"paths":      s.opsPaths(),
 		"node_id":    nodeID,
 		"source":     "agentdock-runtime-api",
 		"updated_at": time.Now().UTC().Format(time.RFC3339Nano),
-	}
-	if taskErr != nil || skillErr != nil || mcpErr != nil {
-		err := firstOpsError(taskErr, skillErr, mcpErr)
-		writeRuntimeUnavailable(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, payload)
-}
-
-func taskUpdatedSince(value string, cutoff time.Time) bool {
-	updatedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value))
-	return err == nil && !updatedAt.Before(cutoff)
+	})
 }
 
 func (s *Server) runtimeTasks(w http.ResponseWriter, r *http.Request) {
@@ -268,7 +272,7 @@ func (s *Server) runtimeSkillDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nodeID := r.PathValue("nodeID")
-	detail, raw, err := s.agentDockHub.RuntimeSkill(r.Context(), nodeID, skillID)
+	detail, raw, err := s.agentDockHub.RuntimeSkill(r.Context(), nodeID, skillID, r.URL.Query().Get("skill_ref"))
 	if err != nil {
 		writeRuntimeUnavailable(w, err)
 		return
@@ -288,7 +292,7 @@ func (s *Server) runtimeSkillFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nodeID := r.PathValue("nodeID")
-	file, err := s.agentDockHub.RuntimeSkillFile(r.Context(), nodeID, skillID, urlPathSegments(relativePath))
+	file, err := s.agentDockHub.RuntimeSkillFile(r.Context(), nodeID, skillID, r.URL.Query().Get("skill_ref"), urlPathSegments(relativePath))
 	if err != nil {
 		writeRuntimeUnavailable(w, err)
 		return
@@ -345,7 +349,7 @@ func runtimeTaskDetailView(detail agentdock.RuntimeTaskDetail) runtimeTaskDetail
 		Events:             events,
 	}
 	if detail.FinalReview != nil {
-		view.FinalReview = &runtimeTaskFinalReview{
+		view.FinalReview = &runtimeTaskFinalReview{IntentSpec: detail.FinalReview.IntentSpec, EngineeringPolicy: detail.FinalReview.EngineeringPolicy,
 			Status:         detail.FinalReview.Status,
 			Summary:        detail.FinalReview.Summary,
 			VerifiedFacts:  detail.FinalReview.VerifiedFacts,
@@ -371,22 +375,22 @@ func runtimeSkillSummaryView(skill agentdock.RuntimeSkillSummary) runtimeSkillSu
 		Source:        "agentdock-api",
 		Path:          "agentdock-api/" + skill.Skill,
 		Description:   skill.Description,
-		UpdatedAt:     skill.UpdatedAt,
 		FileCount:     skill.FileCount,
 		Status:        "installed",
-		ActiveVersion: skill.ActiveVersion,
-		Versions:      skill.Versions,
-		Channels:      skill.Channels,
+		SkillRef:      skill.SkillRef,
+		SourceType:    skill.SourceType,
+		PluginName:    skill.PluginName,
+		ContentDigest: skill.ContentDigest,
 	}
 }
 
 func runtimeSkillDetailView(skillID string, detail agentdock.RuntimeSkillDetail, raw json.RawMessage) runtimeSkillDetail {
 	view := runtimeSkillDetail{
 		runtimeSkillSummary: runtimeSkillSummaryView(agentdock.RuntimeSkillSummary{
-			Skill: skillID, Name: detail.Name, Description: detail.Description, Versions: detail.Versions,
-			ActiveVersion: detail.ActiveVersion, UpdatedAt: detail.UpdatedAt, Channels: detail.Channels,
+			Skill: skillID, Name: detail.Name, Description: detail.Description,
+			SkillRef: detail.SkillRef, SourceType: detail.SourceType, PluginName: detail.PluginName,
+			ContentDigest: detail.ContentDigest,
 		}),
-		Root:         "agentdock-runtime-api",
 		RuntimeState: raw,
 		Files:        make([]runtimeSkillFile, 0, len(detail.Files)),
 	}
@@ -434,15 +438,6 @@ func cleanRuntimeSkillFilePath(value string) (string, error) {
 	return clean, nil
 }
 
-func firstOpsError(values ...error) error {
-	for _, err := range values {
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (s *Server) opsPaths() map[string]string {
 	return map[string]string{"agentdock": "agentdock-runtime-api"}
 }
@@ -453,13 +448,6 @@ func cleanOpsName(value string) (string, error) {
 		return "", fmt.Errorf("invalid name")
 	}
 	return value, nil
-}
-
-func firstSkills(items []runtimeSkillSummary, n int) []runtimeSkillSummary {
-	if len(items) <= n {
-		return items
-	}
-	return items[:n]
 }
 
 func firstNonEmptyString(values ...string) string {

@@ -25,24 +25,24 @@ func nodeToolResourceKeys(nodeID, workspaceID, tool string, arguments map[string
 
 	switch tool {
 	case "file_edit":
-		action := stringArgument(arguments, "action")
+		action := resourceStringArgument(arguments, "action")
 		if action == "patch" {
-			add("file", stringArgument(arguments, "workdir"))
+			add("file", resourceStringArgument(arguments, "workdir"))
 		} else {
-			add("file", stringArgument(arguments, "path"))
-			add("file", stringArgument(arguments, "new_path"))
+			add("file", resourceStringArgument(arguments, "path"))
+			add("file", resourceStringArgument(arguments, "new_path"))
 		}
 	case "file_publish":
-		add("file", stringArgument(arguments, "path"))
+		add("file", resourceStringArgument(arguments, "path"))
 	case "mcp_manage":
-		add("mcp", stringArgument(arguments, "name"))
+		add("mcp", resourceStringArgument(arguments, "name"))
 	case "task_manage":
-		add("task", stringArgument(arguments, "task_id"))
+		add("task", resourceStringArgument(arguments, "task_id"))
 	case "workflow_template_manage":
-		add("workflow", stringArgument(arguments, "template_id"))
-		add("workflow", stringArgument(arguments, "id"))
+		add("workflow", resourceStringArgument(arguments, "template_id"))
+		add("workflow", resourceStringArgument(arguments, "id"))
 	case "mcp_tool_call":
-		qualified := stringArgument(arguments, "name")
+		qualified := resourceStringArgument(arguments, "name")
 		specificBefore := len(keys)
 		if nested, ok := arguments["arguments"].(map[string]any); ok {
 			for _, route := range workspace.RouteCandidates(nested) {
@@ -69,6 +69,11 @@ func nodeToolResourceKeys(nodeID, workspaceID, tool string, arguments map[string
 		}
 	}
 	return out
+}
+
+func resourceStringArgument(arguments map[string]any, key string) string {
+	value, _ := arguments[key].(string)
+	return strings.TrimSpace(value)
 }
 
 func normalizeResourceValue(value string) string {

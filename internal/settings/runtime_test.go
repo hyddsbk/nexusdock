@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -27,8 +28,11 @@ func newRuntimeSettingsTestStore(t *testing.T) (*Store, *sql.DB) {
 		t.Fatal(err)
 	}
 	keyInfo, err := os.Stat(filepath.Join(dataDir, "secrets", "runtime-ai-settings.key"))
-	if err != nil || keyInfo.Mode().Perm() != 0o600 {
-		t.Fatalf("runtime settings key permission = %v, err=%v", keyInfo, err)
+	if err != nil {
+		t.Fatalf("runtime settings key stat = %v", err)
+	}
+	if runtime.GOOS != "windows" && keyInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("runtime settings key permission = %v", keyInfo)
 	}
 	return store, db
 }
@@ -105,4 +109,19 @@ func TestRuntimeSettingsRejectsInvalidInput(t *testing.T) {
 		t.Fatalf("invalid endpoint accepted: %v", err)
 	}
 	_ = validation
+}
+
+func TestRuntimeSettingsKeyRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.key")
+	if err := os.WriteFile(outside, []byte(strings.Repeat("x", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(dir, "runtime-ai-settings.key")
+	if err := os.Symlink(outside, keyPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadOrCreateKey(keyPath); err == nil || !strings.Contains(err.Error(), "普通文件") {
+		t.Fatalf("symlink key error = %v", err)
+	}
 }

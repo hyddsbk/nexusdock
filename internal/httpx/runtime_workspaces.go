@@ -4,16 +4,17 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/uvwt/nexusdock/internal/agentdock"
 	"github.com/uvwt/nexusdock/internal/workspace"
 )
 
-func (s *Server) registerRuntimeWorkspaceRoutes(mux *http.ServeMux, protected func(http.HandlerFunc) http.HandlerFunc) {
-	mux.HandleFunc("GET /v1/runtime/workspaces", protected(s.runtimeWorkspacesList))
-	mux.HandleFunc("POST /v1/runtime/workspaces", protected(s.runtimeWorkspaceCreate))
-	mux.HandleFunc("GET /v1/runtime/workspaces/{workspaceID}", protected(s.runtimeWorkspaceGet))
-	mux.HandleFunc("PATCH /v1/runtime/workspaces/{workspaceID}", protected(s.runtimeWorkspaceUpdate))
-	mux.HandleFunc("DELETE /v1/runtime/workspaces/{workspaceID}", protected(s.runtimeWorkspaceDelete))
+func (s *Server) registerRuntimeWorkspaceRoutes(r chi.Router) {
+	r.Get("/v1/runtime/workspaces", s.runtimeWorkspacesList)
+	r.Post("/v1/runtime/workspaces", s.runtimeWorkspaceCreate)
+	r.Get("/v1/runtime/workspaces/{workspaceID}", s.runtimeWorkspaceGet)
+	r.Patch("/v1/runtime/workspaces/{workspaceID}", s.runtimeWorkspaceUpdate)
+	r.Delete("/v1/runtime/workspaces/{workspaceID}", s.runtimeWorkspaceDelete)
 }
 
 func (s *Server) runtimeWorkspacesList(w http.ResponseWriter, r *http.Request) {

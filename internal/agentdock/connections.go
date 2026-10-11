@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -74,7 +75,7 @@ func (h *Hub) Disconnect(nodeID string) {
 	}
 }
 
-func (h *Hub) Accept(w http.ResponseWriter, r *http.Request, nodeID string) error {
+func (h *Hub) Accept(w http.ResponseWriter, r *http.Request, nodeID, publicURL string) error {
 	node, err := h.store.Get(r.Context(), nodeID)
 	if err != nil {
 		return err
@@ -131,6 +132,7 @@ func (h *Hub) Accept(w http.ResponseWriter, r *http.Request, nodeID string) erro
 	h.mu.Unlock()
 	if err := connection.write(connectionMessage{
 		Type: protocol.MessageNodeReady, ProtocolVersion: ConnectionProtocolVersion, HeartbeatMS: int(heartbeatInterval / time.Millisecond),
+		PublicURL: strings.TrimRight(strings.TrimSpace(publicURL), "/"),
 	}); err != nil {
 		h.mu.Lock()
 		if h.nodes[nodeID] == connection {
@@ -185,7 +187,9 @@ func (h *Hub) Invoke(ctx context.Context, nodeID, operation string, arguments an
 	}
 	defer connection.removePending(requestID)
 
-	if err := connection.write(connectionMessage{Type: protocol.MessageToolInvoke, RequestID: requestID, Operation: operation, Arguments: encoded}); err != nil {
+	message := connectionMessage{Type: protocol.MessageToolInvoke, RequestID: requestID, Operation: operation, Arguments: encoded}
+	injectBridgeTraceContext(ctx, &message)
+	if err := connection.write(message); err != nil {
 		connection.close(err)
 		return nil, ErrNodeDisconnected
 	}

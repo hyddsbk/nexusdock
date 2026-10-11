@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 	protocol "github.com/uvwt/agentdock-protocol"
 	"github.com/uvwt/nexusdock/internal/agentdock"
@@ -18,7 +19,12 @@ import (
 // runtimeContractTestServer 启动一台假的 AgentDock 节点并接入真实 Hub，
 // 让 Runtime 视图走完整的“HTTP handler → Bridge 调用 → DTO 解析 → UI JSON”链路。
 // canned 按上游 path 提供响应 JSON，用来模拟真实节点、旧节点与契约漂移。
-func runtimeContractTestServer(t *testing.T, canned map[string]string) (*Server, *http.ServeMux, string) {
+func runtimeContractTestServer(t *testing.T, canned map[string]string) (*Server, http.Handler, string) {
+	t.Helper()
+	return runtimeContractTestServerWithErrors(t, canned, nil)
+}
+
+func runtimeContractTestServerWithErrors(t *testing.T, canned map[string]string, remoteErrors map[string]*protocol.RemoteError) (*Server, http.Handler, string) {
 	t.Helper()
 	db, err := core.OpenSQLite(t.Context(), ":memory:", 1)
 	if err != nil {
@@ -43,7 +49,7 @@ func runtimeContractTestServer(t *testing.T, canned map[string]string) (*Server,
 	}
 	hub := agentdock.NewHub(store)
 	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := hub.Accept(w, r, node.ID); err != nil {
+		if err := hub.Accept(w, r, node.ID, ""); err != nil {
 			t.Errorf("accept node: %v", err)
 		}
 	}))
@@ -77,6 +83,14 @@ func runtimeContractTestServer(t *testing.T, canned map[string]string) (*Server,
 			}
 			arguments, _ := invoke["arguments"].(map[string]any)
 			path, _ := arguments["path"].(string)
+			if remoteErr := remoteErrors[path]; remoteErr != nil {
+				if err := socket.WriteJSON(map[string]any{
+					"type": protocol.MessageToolError, "request_id": invoke["request_id"], "error": remoteErr,
+				}); err != nil {
+					return
+				}
+				continue
+			}
 			result, ok := canned[path]
 			if !ok {
 				result = `{"ok": false}`
@@ -90,16 +104,15 @@ func runtimeContractTestServer(t *testing.T, canned map[string]string) (*Server,
 	}()
 
 	server := &Server{agentDock: store, agentDockHub: hub, logger: slog.Default()}
-	mux := http.NewServeMux()
-	// Runtime 视图是受保护路由；这里用直通中间件聚焦契约行为本身。
-	server.registerRuntimeRoutes(mux, func(next http.HandlerFunc) http.HandlerFunc { return next })
-	return server, mux, node.ID
+	router := chi.NewRouter()
+	server.registerRuntimeRoutes(router)
+	return server, router, node.ID
 }
 
-func runtimeContractRequest(t *testing.T, mux *http.ServeMux, method, target string) map[string]any {
+func runtimeContractRequest(t *testing.T, handler http.Handler, method, target string) map[string]any {
 	t.Helper()
 	response := httptest.NewRecorder()
-	mux.ServeHTTP(response, httptest.NewRequest(method, target, nil))
+	handler.ServeHTTP(response, httptest.NewRequest(method, target, nil))
 	var payload map[string]any
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("响应不是 JSON（status=%d）: %s", response.Code, response.Body.String())
@@ -108,6 +121,112 @@ func runtimeContractRequest(t *testing.T, mux *http.ServeMux, method, target str
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 	return payload
+}
+
+func TestRuntimeOverviewUsesSingleLightweightProjection(t *testing.T) {
+	_, mux, nodeID := runtimeContractTestServer(t, map[string]string{
+		"/internal/runtime/overview": `{
+			"ok":true,
+			"tasks":{"active":2,"completed":4,"blocked":1,"active_recent_24h":1},
+			"skills":{"count":12},
+			"plugins":{"count":2,"available":true},
+			"mcp":{"count":3}
+		}`,
+	})
+	payload := runtimeContractRequest(t, mux, http.MethodGet, "/v1/runtime/nodes/"+nodeID+"/overview")
+	plugins, _ := payload["plugins"].(map[string]any)
+	if plugins["count"] != float64(2) || plugins["available"] != true {
+		t.Fatalf("Plugin overview = %v, want count=2 available=true; payload=%v", plugins, payload)
+	}
+	tasks, _ := payload["tasks"].(map[string]any)
+	if tasks["active"] != float64(2) || tasks["active_recent_24h"] != float64(1) {
+		t.Fatalf("Task overview = %v; payload=%v", tasks, payload)
+	}
+	skills, _ := payload["skills"].(map[string]any)
+	mcp, _ := payload["mcp"].(map[string]any)
+	if skills["count"] != float64(12) || mcp["count"] != float64(3) {
+		t.Fatalf("overview counts = %v", payload)
+	}
+}
+
+func TestRuntimeOverviewFallsBackForLegacyAgentDock(t *testing.T) {
+	_, mux, nodeID := runtimeContractTestServerWithErrors(t, map[string]string{
+		"/internal/runtime/tasks":   `{"ok":true,"tasks":[]}`,
+		"/internal/runtime/skills":  `{"ok":true,"skills":[]}`,
+		"/internal/runtime/mcp":     `{"ok":true,"servers":[]}`,
+		"/internal/runtime/plugins": `{"ok":true,"plugins":[]}`,
+	}, map[string]*protocol.RemoteError{
+		"/internal/runtime/overview": {
+			Code: "NOT_FOUND", Category: "not_found", Message: "runtime API route not found",
+		},
+	})
+	payload := runtimeContractRequest(t, mux, http.MethodGet, "/v1/runtime/nodes/"+nodeID+"/overview")
+	if payload["ok"] != true {
+		t.Fatalf("旧 AgentDock fallback 应成功: %v", payload)
+	}
+	for _, field := range []string{"skills", "mcp", "plugins"} {
+		value, _ := payload[field].(map[string]any)
+		if value["count"] != float64(0) {
+			t.Fatalf("%s fallback count = %v", field, value)
+		}
+	}
+}
+
+func TestRuntimeOverviewKeepsMetricsWhenPluginsUnavailable(t *testing.T) {
+	_, mux, nodeID := runtimeContractTestServer(t, map[string]string{
+		"/internal/runtime/overview": `{
+			"ok":true,
+			"tasks":{"active":0,"completed":0,"blocked":0,"active_recent_24h":0},
+			"skills":{"count":5},
+			"plugins":{"count":0,"available":false},
+			"mcp":{"count":2}
+		}`,
+	})
+	payload := runtimeContractRequest(t, mux, http.MethodGet, "/v1/runtime/nodes/"+nodeID+"/overview")
+	if payload["ok"] != true {
+		t.Fatalf("Plugin 不可用不应让 overview 失败: %v", payload)
+	}
+	plugins, _ := payload["plugins"].(map[string]any)
+	if plugins["available"] != false || plugins["count"] != float64(0) {
+		t.Fatalf("Plugin unavailable overview = %v, want count=0 available=false", plugins)
+	}
+	skills, _ := payload["skills"].(map[string]any)
+	mcp, _ := payload["mcp"].(map[string]any)
+	if skills["count"] != float64(5) || mcp["count"] != float64(2) {
+		t.Fatalf("Plugin 不可用不应影响已有指标: %v", payload)
+	}
+}
+
+func TestRuntimeDiagnosticsThroughBridgeReturnsZeroPayloadView(t *testing.T) {
+	_, mux, nodeID := runtimeContractTestServer(t, map[string]string{
+		"/internal/runtime/diagnostics": "{\"ok\":true,\"source\":\"agentdock-runtime-api\",\"recent_calls\":[{\"id\":\"9\",\"tool\":\"exec_command\",\"source\":\"nexus\",\"trace_id\":\"4bf92f3577b34da6a3ce929d0e0e4736\",\"started_at\":\"2026-09-29T07:00:00.123456Z\",\"duration_ms\":25.5,\"success\":false,\"error_code\":\"COMMAND_FAILED\",\"error_category\":\"runtime\",\"stages\":[{\"name\":\"command.start\",\"started_offset_ms\":1.2,\"duration_ms\":3.4,\"success\":true}]}]}",
+	})
+	payload := runtimeContractRequest(t, mux, http.MethodGet, "/v1/runtime/nodes/"+nodeID+"/diagnostics")
+	if payload["ok"] != true || payload["count"] != float64(1) {
+		t.Fatalf("diagnostics response = %#v", payload)
+	}
+	items, _ := payload["items"].([]any)
+	call, _ := items[0].(map[string]any)
+	if call["id"] != "9" || call["tool"] != "exec_command" || call["source"] != "nexus" {
+		t.Fatalf("diagnostic call = %#v", call)
+	}
+	stages, _ := call["stages"].([]any)
+	if len(stages) != 1 {
+		t.Fatalf("diagnostic stages = %#v", call["stages"])
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lower := strings.ToLower(string(body))
+	for _, forbidden := range []string{
+		"span_id", "arguments", "result", "output", "stdout", "stderr", "command", "command_line", "path",
+		"error_message", "stack", "tool_stats", "process", "p50_duration_ms", "p95_duration_ms", "p99_duration_ms",
+	} {
+		if strings.Contains(lower, "\""+forbidden+"\"") {
+			t.Fatalf("diagnostics leaked %q: %s", forbidden, lower)
+		}
+	}
 }
 
 func TestRuntimeTasksThroughBridgeReturnsTypedView(t *testing.T) {
@@ -158,18 +277,24 @@ func TestRuntimeTasksThroughBridgeRejectsContractDrift(t *testing.T) {
 
 func TestRuntimeMCPServersThroughBridgeReturnsTypedView(t *testing.T) {
 	_, mux, nodeID := runtimeContractTestServer(t, map[string]string{
-		"/internal/runtime/mcp": `{"action": "list", "ok": true, "source": "agentdock-api", "count": 1, "servers": [
+		"/internal/runtime/mcp": `{"action": "list", "ok": true, "source": "agentdock-api", "count": 2, "servers": [
 			{"name": "github", "description": "GitHub MCP", "transport": "streamable_http",
-			 "enabled": true, "status": "ready", "tool_count": 12}]}`,
+			 "source_type": "standalone", "enabled": true, "status": "ready", "tool_count": 12},
+			{"name": "plugin.context7.context7", "description": "Context7 Plugin MCP", "transport": "streamable_http",
+			 "source_type": "plugin", "plugin_name": "context7", "enabled": true, "status": "ready", "tool_count": 2}]}`,
 	})
 	payload := runtimeContractRequest(t, mux, http.MethodGet, "/v1/runtime/nodes/"+nodeID+"/mcp")
-	if payload["ok"] != true || payload["count"] != float64(1) {
+	if payload["ok"] != true || payload["count"] != float64(2) {
 		t.Fatalf("MCP 列表响应错误: %v", payload)
 	}
 	servers, _ := payload["servers"].([]any)
-	server, _ := servers[0].(map[string]any)
-	if server["name"] != "github" || server["enabled"] != true || server["tool_count"] != float64(12) {
-		t.Fatalf("MCP 摘要字段错误: %v", server)
+	standalone, _ := servers[0].(map[string]any)
+	pluginMCP, _ := servers[1].(map[string]any)
+	if standalone["name"] != "github" || standalone["source_type"] != "standalone" || standalone["enabled"] != true || standalone["tool_count"] != float64(12) {
+		t.Fatalf("standalone MCP 摘要字段错误: %v", standalone)
+	}
+	if pluginMCP["name"] != "plugin.context7.context7" || pluginMCP["source_type"] != "plugin" || pluginMCP["plugin_name"] != "context7" {
+		t.Fatalf("Plugin MCP 摘要字段错误: %v", pluginMCP)
 	}
 }
 
@@ -204,6 +329,30 @@ func TestRuntimeTaskDetailThroughBridgeDerivesProgress(t *testing.T) {
 	}
 }
 
+func TestRuntimeSkillsThroughBridgeExposeCurrentContentIdentity(t *testing.T) {
+	_, mux, nodeID := runtimeContractTestServer(t, map[string]string{
+		"/internal/runtime/skills": `{"action":"list","count":1,"source":"agentdock-api","skills":[{
+			"skill":"demo","name":"demo","description":"Demo Skill",
+			"skill_ref":"skill://managed/demo","source_type":"managed",
+			"content_digest":"sha256:abc123","file_count":2}]}`,
+	})
+	payload := runtimeContractRequest(t, mux, http.MethodGet, "/v1/runtime/nodes/"+nodeID+"/skills")
+	items, _ := payload["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("Skill 列表响应错误: %v", payload)
+	}
+	item, _ := items[0].(map[string]any)
+	if item["skill_ref"] != "skill://managed/demo" || item["source_type"] != "managed" ||
+		item["content_digest"] != "sha256:abc123" {
+		t.Fatalf("Skill 当前内容身份字段错误: %v", item)
+	}
+	for _, legacy := range []string{"active_version", "versions", "channels"} {
+		if _, ok := item[legacy]; ok {
+			t.Fatalf("Skill UI API 不应保留旧版本字段 %q: %v", legacy, item)
+		}
+	}
+}
+
 func TestRuntimeSkillFileThroughBridgeRejectsWrongType(t *testing.T) {
 	_, mux, nodeID := runtimeContractTestServer(t, map[string]string{
 		"/internal/runtime/skills/demo/files/SKILL.md": `{"action": "file", "ok": true,
@@ -217,5 +366,49 @@ func TestRuntimeSkillFileThroughBridgeRejectsWrongType(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), "file.size_bytes") {
 		t.Fatalf("错误缺少字段路径: %s", response.Body.String())
+	}
+}
+
+func TestMCPOAuthCallbackRelaysToTargetNodeWithoutWebSession(t *testing.T) {
+	server, _, nodeID := runtimeContractTestServer(t, map[string]string{
+		"/internal/runtime/mcp/oauth/callback": `{"accepted": true}`,
+	})
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet,
+		"/oauth/mcp/nodes/"+nodeID+"/callback?code=code-1&state=state-1&iss=https%3A%2F%2Fissuer.example.test", nil)
+	request.SetPathValue("nodeID", nodeID)
+
+	server.mcpOAuthCallback(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("Referrer-Policy") != "no-referrer" {
+		t.Fatalf("callback security headers = %#v", response.Header())
+	}
+	if strings.Contains(response.Body.String(), "code-1") || strings.Contains(response.Body.String(), "state-1") {
+		t.Fatalf("callback response echoed one-time credentials: %s", response.Body.String())
+	}
+}
+
+func TestRuntimeMCPAuthorizeAlwaysUsesNexusCallback(t *testing.T) {
+	server, _, nodeID := runtimeContractTestServer(t, map[string]string{
+		"/internal/runtime/mcp": `{"action":"authorize","name":"cloudflare","authorization_url":"https://auth.example.test/authorize","callback_id":"nexus"}`,
+	})
+	router := chi.NewRouter()
+	server.registerRuntimeMCPRoutes(router)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/runtime/nodes/"+nodeID+"/mcp/cloudflare/authorize", nil)
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["callback_id"] != "nexus" || payload["authorization_url"] == "" {
+		t.Fatalf("authorize payload = %#v", payload)
 	}
 }

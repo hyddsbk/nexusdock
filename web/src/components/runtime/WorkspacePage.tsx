@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { FolderKanban, Save, ShieldCheck } from 'lucide-react';
 import { ApiError, api } from '../../api/client';
 import { formatTime } from '../../lib/time';
-import type { AgentDockNode } from './AgentDockNodes';
+import type { AgentDockNode } from '../../api/generated';
 
 type Workspace = {
   id: string;
@@ -182,7 +182,7 @@ export default function WorkspacePage({ refreshToken, nodes }: { refreshToken: n
           <small>{t('Stored in Nexus and enforced before routed AgentDock calls.')}</small>
         </div>
         {loading && items.length === 0 && <p className="empty-mini">{t('Loading Workspaces…')}</p>}
-        {!loading && items.length === 0 && <p className="empty-mini">{t('No Workspaces configured.')}</p>}
+        {loading && items.length === 0 && <p className="empty-mini">{t('Loading Workspaces…')}</p>}
         <div className="workspace-list-items">
           {items.map((item) => {
             const node = nodes.find((candidate) => candidate.id === item.node_id);

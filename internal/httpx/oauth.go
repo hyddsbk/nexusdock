@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/uvwt/nexusdock/internal/auth"
 	"github.com/uvwt/nexusdock/internal/core"
 )
@@ -147,19 +148,19 @@ func (l *fixedWindowLimiter) Allow(key string, now time.Time) bool {
 	return true
 }
 
-func (s *Server) registerOAuthRoutes(mux *http.ServeMux) {
+func (s *accessControl) registerOAuthRoutes(r chi.Router) {
 	if s.oauth == nil || s.auth == nil {
 		return
 	}
-	mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.oauthAuthorizationServerMetadata)
-	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp", s.oauthProtectedResourceMetadata)
-	mux.HandleFunc("POST /register", s.oauthRegisterClient)
-	mux.HandleFunc("GET /oauth/authorize", s.oauthAuthorize)
-	mux.HandleFunc("POST /oauth/authorize", s.oauthAuthorize)
-	mux.HandleFunc("POST /oauth/token", s.oauthToken)
+	r.Get("/.well-known/oauth-authorization-server", s.oauthAuthorizationServerMetadata)
+	r.Get("/.well-known/oauth-protected-resource/mcp", s.oauthProtectedResourceMetadata)
+	r.Post("/register", s.oauthRegisterClient)
+	r.Get("/oauth/authorize", s.oauthAuthorize)
+	r.Post("/oauth/authorize", s.oauthAuthorize)
+	r.Post("/oauth/token", s.oauthToken)
 }
 
-func (s *Server) oauthAuthorizationServerMetadata(w http.ResponseWriter, r *http.Request) {
+func (s *accessControl) oauthAuthorizationServerMetadata(w http.ResponseWriter, r *http.Request) {
 	issuer := s.oauthIssuer(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"issuer":                                issuer,
@@ -175,7 +176,7 @@ func (s *Server) oauthAuthorizationServerMetadata(w http.ResponseWriter, r *http
 	})
 }
 
-func (s *Server) oauthProtectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
+func (s *accessControl) oauthProtectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
 	issuer := s.oauthIssuer(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"resource":                 issuer + "/mcp",
@@ -185,7 +186,7 @@ func (s *Server) oauthProtectedResourceMetadata(w http.ResponseWriter, r *http.R
 	})
 }
 
-func (s *Server) oauthRegisterClient(w http.ResponseWriter, r *http.Request) {
+func (s *accessControl) oauthRegisterClient(w http.ResponseWriter, r *http.Request) {
 	if !s.oauthRegisterLimiter.Allow(s.clientIPPrefix(r), time.Now()) {
 		w.Header().Set("Retry-After", "60")
 		writeOAuthJSONError(w, http.StatusTooManyRequests, "temporarily_unavailable", "too many client registrations")
@@ -233,7 +234,7 @@ func (s *Server) oauthRegisterClient(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
+func (s *accessControl) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Vary", "Accept-Language")
@@ -332,7 +333,7 @@ func (s *Server) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 	redirectOAuthResult(w, r, params.RedirectURI, url.Values{"code": {code}, "state": {params.State}})
 }
 
-func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
+func (s *accessControl) oauthToken(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
 	r.Body = http.MaxBytesReader(w, r.Body, oauthFormBodyLimit)
@@ -397,18 +398,18 @@ func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) withMCPAccess(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func (s *accessControl) withMCPAccess(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		header := strings.TrimSpace(r.Header.Get("Authorization"))
 		if s.mcpToken != nil && mcpTokenMatches(header, s.mcpToken.Token()) {
 			actor := core.Actor{Type: core.ActorSystem, ID: "mcp_token"}
-			next(w, r.WithContext(withMCPActorContext(r.Context(), actor)))
+			next.ServeHTTP(w, r.WithContext(withMCPActorContext(r.Context(), actor)))
 			return
 		}
 		if strings.HasPrefix(strings.ToLower(header), "bearer ") && s.oauth != nil {
 			if access, err := s.oauth.AuthenticateAccess(r.Context(), bearerToken(header), s.oauthResource(r)); err == nil {
 				actor := core.Actor{Type: core.ActorUser, ID: access.UserID}
-				next(w, r.WithContext(withMCPActorContext(r.Context(), actor)))
+				next.ServeHTTP(w, r.WithContext(withMCPActorContext(r.Context(), actor)))
 				return
 			}
 			s.writeMCPBearerChallenge(w, r, true)
@@ -416,17 +417,17 @@ func (s *Server) withMCPAccess(next http.HandlerFunc) http.HandlerFunc {
 		}
 		if header == "" && s.auth != nil {
 			if _, err := s.authenticateCookie(r); err == nil {
-				s.withWebSession(next, false)(w, r)
+				s.withWebSession(next, false).ServeHTTP(w, r)
 				return
 			}
 		}
 		if s.auth == nil && s.isLocalAPIRequest(r) {
 			actor := core.Actor{Type: core.ActorSystem, ID: "local_mcp"}
-			next(w, r.WithContext(withMCPActorContext(r.Context(), actor)))
+			next.ServeHTTP(w, r.WithContext(withMCPActorContext(r.Context(), actor)))
 			return
 		}
 		s.writeMCPBearerChallenge(w, r, false)
-	}
+	})
 }
 
 func mcpTokenMatches(header, expected string) bool {
@@ -437,7 +438,7 @@ func mcpTokenMatches(header, expected string) bool {
 	return len(actual) == len(expected) && subtle.ConstantTimeCompare([]byte(actual), []byte(expected)) == 1
 }
 
-func (s *Server) writeMCPBearerChallenge(w http.ResponseWriter, r *http.Request, invalid bool) {
+func (s *accessControl) writeMCPBearerChallenge(w http.ResponseWriter, r *http.Request, invalid bool) {
 	challenge := "Bearer"
 	if s.oauth != nil {
 		challenge += ` resource_metadata="` + s.oauthIssuer(r) + `/.well-known/oauth-protected-resource/mcp"`
@@ -449,7 +450,7 @@ func (s *Server) writeMCPBearerChallenge(w http.ResponseWriter, r *http.Request,
 	writeAuthError(w, http.StatusUnauthorized, "UNAUTHORIZED", "OAuth authorization is required for MCP access")
 }
 
-func (s *Server) parseOAuthAuthorizationRequest(r *http.Request, values url.Values) (oauthAuthorizationRequest, error) {
+func (s *accessControl) parseOAuthAuthorizationRequest(r *http.Request, values url.Values) (oauthAuthorizationRequest, error) {
 	for _, key := range []string{"response_type", "client_id", "redirect_uri", "code_challenge", "code_challenge_method", "resource", "scope", "state"} {
 		if len(values[key]) > 1 {
 			return oauthAuthorizationRequest{}, fmt.Errorf("OAuth parameter must not be repeated: %s", key)
@@ -483,7 +484,7 @@ func (s *Server) parseOAuthAuthorizationRequest(r *http.Request, values url.Valu
 	return params, nil
 }
 
-func (s *Server) oauthIssuer(r *http.Request) string {
+func (s *accessControl) oauthIssuer(r *http.Request) string {
 	scheme := "http"
 	host := r.Host
 	if r.TLS != nil {
@@ -500,7 +501,7 @@ func (s *Server) oauthIssuer(r *http.Request) string {
 	return scheme + "://" + host
 }
 
-func (s *Server) oauthResource(r *http.Request) string { return s.oauthIssuer(r) + "/mcp" }
+func (s *accessControl) oauthResource(r *http.Request) string { return s.oauthIssuer(r) + "/mcp" }
 
 func authorizationValues(params oauthAuthorizationRequest) url.Values {
 	values := url.Values{}

@@ -216,7 +216,7 @@ The Quick Start above is the default recommended path. You do not need to use th
 | `NEXUS_DATA_DIR` | `./nexus-data` | Host directory mounted to `/var/lib/nexus` |
 | `RECALL_REPO_DIR` | `./recall` | Host directory mounted to `/recall` |
 | `NEXUS_PUBLIC_URL` | empty | Public HTTPS origin, for example `https://nexus.example.com` |
-| `NEXUS_TRUSTED_PROXIES` | `127.0.0.1,::1` | Proxies allowed to supply trusted `X-Forwarded-*` headers |
+| `NEXUS_TRUSTED_PROXIES` | automatic | Trusts loopback by default; Linux containers add the current container's RFC1918 bridge gateway only when exactly one eligible default gateway is detected. An explicit value fully overrides the automatic set |
 | `NEXUS_TOOL_CONCURRENCY_GLOBAL` | `16` | Maximum concurrent routed AgentDock tool calls across the NexusDock process (`1-256`) |
 | `NEXUS_TOOL_CONCURRENCY_PER_NODE` | `4` | Maximum concurrent routed tool calls for one AgentDock node (`1-64`) |
 | `NEXUS_TOOL_CONCURRENCY_PER_WORKSPACE` | `3` | Maximum concurrent routed tool calls for one Workspace (`1-64`) |
@@ -248,6 +248,21 @@ When running the NexusDock binary directly, these additional environment variabl
 ## Security notes
 
 For a remote deployment, administrator login requires HTTPS. Direct `localhost` / loopback access is the only HTTP exception.
+
+When host Nginx/Caddy proxies to the official Docker loopback port, you do not need to configure a Docker subnet manually. NexusDock automatically trusts the container host bridge gateway only when exactly one eligible RFC1918 default gateway is detected; complex network topologies must configure `NEXUS_TRUSTED_PROXIES` explicitly. The proxy must still forward the external scheme, for example with Nginx:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:18777;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Real-IP $remote_addr;
+}
+```
+
+Set `NEXUS_TRUSTED_PROXIES` explicitly only for more complex proxy chains; an explicit value disables automatic container-gateway trust. If you change `NEXUS_HTTP_BIND` to `0.0.0.0`, configure exact trusted proxies and restrict ingress with a firewall instead of relying on automatic gateway trust.
 
 - keep the container port bound to loopback and publish the service through HTTPS;
 - set `NEXUS_PUBLIC_URL` to the real HTTPS origin;

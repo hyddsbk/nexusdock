@@ -3,6 +3,7 @@ package httpx
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/uvwt/nexusdock/internal/auth"
 	"github.com/uvwt/nexusdock/internal/core"
 )
@@ -18,6 +20,54 @@ import (
 const sessionCookieName = "nexus_session"
 
 type webSessionContextKey struct{}
+
+type accessControl struct {
+	auth                 *auth.Service
+	oauth                *auth.OAuthService
+	mcpToken             *auth.MCPTokenStore
+	oauthRegisterLimiter *fixedWindowLimiter
+	trustedProxies       []netip.Prefix
+	logger               *slog.Logger
+}
+
+func newAccessControl(trustedProxies []netip.Prefix, logger *slog.Logger) accessControl {
+	return accessControl{
+		trustedProxies: append([]netip.Prefix(nil), trustedProxies...),
+		logger:         logger,
+	}
+}
+
+func (s *accessControl) configured() bool {
+	return s != nil && s.auth != nil
+}
+
+// authenticateDeviceToken 只负责验证 Device Token 的密码学身份。
+// 节点是否存在、是否启用属于 AgentDock 设备域，必须由 Server 在上层继续判定。
+func (s *accessControl) authenticateDeviceToken(ctx context.Context, authorization string) (string, error) {
+	if s == nil || s.auth == nil {
+		return "", core.NewError(core.CodeAuthRequired, "device authentication is not configured", nil)
+	}
+	principal, err := s.auth.Authenticate(ctx, bearerToken(authorization))
+	if err != nil {
+		return "", err
+	}
+	if principal.Actor.Type != core.ActorDevice || principal.TokenKind != "device_token" {
+		return "", core.NewError(core.CodeInvalidToken, "invalid device token", nil)
+	}
+	return principal.Actor.ID, nil
+}
+
+// issueDeviceToken 只签发节点身份凭据；节点配对与回滚仍由 Server 负责。
+func (s *accessControl) issueDeviceToken(ctx context.Context, nodeID string) (string, error) {
+	if s == nil || s.auth == nil {
+		return "", core.NewError(core.CodeAuthRequired, "device authentication is not configured", nil)
+	}
+	issued, err := s.auth.IssueToken(ctx, core.Actor{Type: core.ActorDevice, ID: nodeID}, "device_token", nil, 0)
+	if err != nil {
+		return "", err
+	}
+	return issued.Token, nil
+}
 
 func withWebSessionContext(ctx context.Context, session auth.WebSession) context.Context {
 	return context.WithValue(ctx, webSessionContextKey{}, session)
@@ -28,7 +78,7 @@ func webSessionFromContext(ctx context.Context) (auth.WebSession, bool) {
 	return session, ok
 }
 
-func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
+func (s *accessControl) authStatus(w http.ResponseWriter, r *http.Request) {
 	if s.auth == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "initialized": false})
 		return
@@ -41,7 +91,7 @@ func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "initialized": status.Initialized})
 }
 
-func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+func (s *accessControl) login(w http.ResponseWriter, r *http.Request) {
 	if !s.loginTransportAllowed(r) {
 		writeAuthError(w, http.StatusBadRequest, "HTTPS_REQUIRED", "login requires HTTPS")
 		return
@@ -93,12 +143,12 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session": issued.Session})
 }
 
-func (s *Server) currentSession(w http.ResponseWriter, r *http.Request) {
+func (s *accessControl) currentSession(w http.ResponseWriter, r *http.Request) {
 	session, _ := webSessionFromContext(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session": session})
 }
 
-func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+func (s *accessControl) logout(w http.ResponseWriter, r *http.Request) {
 	session, _ := webSessionFromContext(r.Context())
 	err := s.auth.RevokeWebSession(r.Context(), session.UserID, session.ID, "logout")
 	if err != nil && core.ErrorCodeOf(err) != core.CodeNotFound {
@@ -109,7 +159,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-func (s *Server) updateCredential(w http.ResponseWriter, r *http.Request) {
+func (s *accessControl) updateCredential(w http.ResponseWriter, r *http.Request) {
 	session, _ := webSessionFromContext(r.Context())
 	var request struct {
 		Current string `json:"current"`
@@ -133,7 +183,7 @@ func (s *Server) updateCredential(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "reauthenticate": true})
 }
 
-func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
+func (s *accessControl) listSessions(w http.ResponseWriter, r *http.Request) {
 	session, _ := webSessionFromContext(r.Context())
 	items, err := s.auth.ListWebSessions(r.Context(), session.UserID, session.ID)
 	if err != nil {
@@ -143,7 +193,7 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "items": items})
 }
 
-func (s *Server) revokeSession(w http.ResponseWriter, r *http.Request) {
+func (s *accessControl) revokeSession(w http.ResponseWriter, r *http.Request) {
 	current, _ := webSessionFromContext(r.Context())
 	target := r.PathValue("sessionID")
 	if target == current.ID {
@@ -161,7 +211,7 @@ func (s *Server) revokeSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-func (s *Server) logoutOtherSessions(w http.ResponseWriter, r *http.Request) {
+func (s *accessControl) logoutOtherSessions(w http.ResponseWriter, r *http.Request) {
 	current, _ := webSessionFromContext(r.Context())
 	count, err := s.auth.RevokeOtherWebSessions(r.Context(), current.UserID, current.ID)
 	if err != nil {
@@ -171,10 +221,10 @@ func (s *Server) logoutOtherSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "revoked": count})
 }
 
-func (s *Server) withUIAccess(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func (s *accessControl) withUIAccess(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.auth == nil {
-			next(w, r)
+			next.ServeHTTP(w, r)
 			return
 		}
 		session, err := s.authenticateCookie(r)
@@ -186,12 +236,12 @@ func (s *Server) withUIAccess(next http.HandlerFunc) http.HandlerFunc {
 			http.Redirect(w, r, "/change-password?return_to="+url.QueryEscape(safeReturnTo(r.URL.RequestURI())), http.StatusFound)
 			return
 		}
-		next(w, r.WithContext(withWebSessionContext(r.Context(), session)))
-	}
+		next.ServeHTTP(w, r.WithContext(withWebSessionContext(r.Context(), session)))
+	})
 }
 
-func (s *Server) withWebSession(next http.HandlerFunc, allowCredentialUpdate bool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func (s *accessControl) withWebSession(next http.Handler, allowCredentialUpdate bool) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		session, err := s.authenticateCookie(r)
 		if err != nil {
 			writeAuthError(w, http.StatusUnauthorized, "SESSION_REQUIRED", "login session is missing or expired")
@@ -211,43 +261,44 @@ func (s *Server) withWebSession(next http.HandlerFunc, allowCredentialUpdate boo
 				return
 			}
 		}
-		next(w, r.WithContext(withWebSessionContext(r.Context(), session)))
+		next.ServeHTTP(w, r.WithContext(withWebSessionContext(r.Context(), session)))
+	})
+}
+
+func (s *accessControl) webSessionMiddleware(allowCredentialUpdate bool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return s.withWebSession(next, allowCredentialUpdate)
 	}
 }
 
-func (s *Server) withAPIAccess(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func (s *accessControl) withAPIAccess(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.auth != nil {
-			s.withWebSession(next, false)(w, r)
+			s.withWebSession(next, false).ServeHTTP(w, r)
 			return
 		}
 		if s.isLocalAPIRequest(r) {
-			next(w, r)
+			next.ServeHTTP(w, r)
 			return
 		}
 		writeAuthError(w, http.StatusUnauthorized, "UNAUTHORIZED", "missing or invalid API credentials")
-	}
+	})
 }
 
-func (s *Server) withDeviceOrAPIAccess(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if s.auth != nil {
-			principal, err := s.auth.Authenticate(r.Context(), bearerToken(r.Header.Get("Authorization")))
-			if err == nil && principal.Actor.Type == core.ActorDevice && principal.TokenKind == "device_token" {
-				if s.agentDock != nil {
-					node, lookupErr := s.agentDock.Get(r.Context(), principal.Actor.ID)
-					if lookupErr == nil && node.Enabled {
-						next(w, r)
-						return
-					}
-				}
+func (s *Server) withDeviceOrAPIAccess(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if nodeID, err := s.access.authenticateDeviceToken(r.Context(), r.Header.Get("Authorization")); err == nil && s.agentDock != nil {
+			node, lookupErr := s.agentDock.Get(r.Context(), nodeID)
+			if lookupErr == nil && node.Enabled {
+				next.ServeHTTP(w, r)
+				return
 			}
 		}
-		s.withAPIAccess(next)(w, r)
-	}
+		s.access.withAPIAccess(next).ServeHTTP(w, r)
+	})
 }
 
-func (s *Server) authenticateCookie(r *http.Request) (auth.WebSession, error) {
+func (s *accessControl) authenticateCookie(r *http.Request) (auth.WebSession, error) {
 	if s.auth == nil {
 		return auth.WebSession{}, core.NewError(core.CodeAuthRequired, "web authentication is not configured", nil)
 	}
@@ -258,7 +309,7 @@ func (s *Server) authenticateCookie(r *http.Request) (auth.WebSession, error) {
 	return s.auth.AuthenticateWebSession(r.Context(), cookie.Value)
 }
 
-func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, value string, remember bool, expires time.Time) {
+func (s *accessControl) setSessionCookie(w http.ResponseWriter, r *http.Request, value string, remember bool, expires time.Time) {
 	cookie := &http.Cookie{
 		Name: sessionCookieName, Value: value, Path: "/", HttpOnly: true,
 		Secure: s.secureRequest(r), SameSite: http.SameSiteStrictMode,
@@ -270,7 +321,7 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, value 
 	http.SetCookie(w, cookie)
 }
 
-func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+func (s *accessControl) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookieName, Value: "", Path: "/", HttpOnly: true,
 		Secure: s.secureRequest(r), SameSite: http.SameSiteStrictMode,
@@ -278,14 +329,14 @@ func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) secureRequest(r *http.Request) bool {
+func (s *accessControl) secureRequest(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
 	return s.isTrustedProxy(r) && strings.EqualFold(lastForwardedValue(r.Header.Get("X-Forwarded-Proto")), "https")
 }
 
-func (s *Server) loginTransportAllowed(r *http.Request) bool {
+func (s *accessControl) loginTransportAllowed(r *http.Request) bool {
 	if s.secureRequest(r) {
 		return true
 	}
@@ -300,7 +351,7 @@ func (s *Server) loginTransportAllowed(r *http.Request) bool {
 		r.Header.Get("X-Forwarded-Proto") == ""
 }
 
-func (s *Server) sameOrigin(r *http.Request) bool {
+func (s *accessControl) sameOrigin(r *http.Request) bool {
 	origin := strings.TrimSpace(r.Header.Get("Origin"))
 	if origin == "" {
 		return false
@@ -325,7 +376,7 @@ func (s *Server) sameOrigin(r *http.Request) bool {
 	return strings.EqualFold(parsed.Scheme, scheme) && strings.EqualFold(parsed.Host, host)
 }
 
-func (s *Server) isLocalAPIRequest(r *http.Request) bool {
+func (s *accessControl) isLocalAPIRequest(r *http.Request) bool {
 	return isLoopbackHostPort(r.RemoteAddr)
 }
 
@@ -342,11 +393,11 @@ func isLoopbackHostPort(value string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func (s *Server) isTrustedProxy(r *http.Request) bool {
+func (s *accessControl) isTrustedProxy(r *http.Request) bool {
 	return s.isTrustedProxyIP(remoteIP(r.RemoteAddr))
 }
 
-func (s *Server) isTrustedProxyIP(ip net.IP) bool {
+func (s *accessControl) isTrustedProxyIP(ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
@@ -355,7 +406,7 @@ func (s *Server) isTrustedProxyIP(ip net.IP) bool {
 		return false
 	}
 	// cfg.TrustedProxies 在启动时已解析为规范化前缀，这里只做地址族一致的包含判断。
-	for _, prefix := range s.cfg.TrustedProxies {
+	for _, prefix := range s.trustedProxies {
 		if prefix.Contains(addr) {
 			return true
 		}
@@ -374,7 +425,7 @@ func netipAddr(ip net.IP) (netip.Addr, bool) {
 	return addr.Unmap(), true
 }
 
-func (s *Server) clientIPPrefix(r *http.Request) string {
+func (s *accessControl) clientIPPrefix(r *http.Request) string {
 	ip := remoteIP(r.RemoteAddr)
 	if ip != nil && s.isTrustedProxyIP(ip) {
 		if forwarded, ok := forwardedIPs(r.Header.Get("X-Forwarded-For")); ok && len(forwarded) > 0 {
@@ -503,16 +554,20 @@ func publicCodedMessage(err error, fallback string) string {
 	return fallback
 }
 
-func (s *Server) registerWebAuthRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /login", s.uiIndex)
-	mux.HandleFunc("GET /ui/assets/", s.uiApp)
-	mux.HandleFunc("GET /change-password", s.withUIAccess(s.uiIndex))
-	mux.HandleFunc("GET /v1/auth/status", s.authStatus)
-	mux.HandleFunc("POST /v1/auth/login", s.login)
-	mux.HandleFunc("GET /v1/auth/session", s.withWebSession(s.currentSession, true))
-	mux.HandleFunc("POST /v1/auth/logout", s.withWebSession(s.logout, true))
-	mux.HandleFunc("POST /v1/auth/credential", s.withWebSession(s.updateCredential, true))
-	mux.HandleFunc("GET /v1/auth/sessions", s.withWebSession(s.listSessions, false))
-	mux.HandleFunc("DELETE /v1/auth/sessions/{sessionID}", s.withWebSession(s.revokeSession, false))
-	mux.HandleFunc("POST /v1/auth/sessions/logout-others", s.withWebSession(s.logoutOtherSessions, false))
+func (s *Server) registerWebAuthRoutes(r chi.Router) {
+	r.Get("/login", s.uiIndex)
+	r.Get("/ui/assets/*", s.uiApp)
+	r.With(s.access.withUIAccess).Get("/change-password", s.uiIndex)
+	r.Get("/v1/auth/status", s.access.authStatus)
+	r.Post("/v1/auth/login", s.access.login)
+
+	allowCredentialUpdate := s.access.webSessionMiddleware(true)
+	r.With(allowCredentialUpdate).Get("/v1/auth/session", s.access.currentSession)
+	r.With(allowCredentialUpdate).Post("/v1/auth/logout", s.access.logout)
+	r.With(allowCredentialUpdate).Post("/v1/auth/credential", s.access.updateCredential)
+
+	requireReadySession := s.access.webSessionMiddleware(false)
+	r.With(requireReadySession).Get("/v1/auth/sessions", s.access.listSessions)
+	r.With(requireReadySession).Delete("/v1/auth/sessions/{sessionID}", s.access.revokeSession)
+	r.With(requireReadySession).Post("/v1/auth/sessions/logout-others", s.access.logoutOtherSessions)
 }
