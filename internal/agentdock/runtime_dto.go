@@ -67,12 +67,23 @@ type RuntimeOverview struct {
 
 // RuntimeTaskStep 是任务的执行步骤。列表项里的 current_step 只携带 id/title/status，
 // 任务详情中的完整步骤会额外带 phase/updated_at，缺失时保持零值。
+type RuntimeStepQuality struct {
+	Kind              string            `json:"kind"`
+	Outcome           string            `json:"outcome"`
+	RefactorGroup     string            `json:"refactor_group,omitempty"`
+	DependencyReasons map[string]string `json:"dependency_reasons,omitempty"`
+}
+
 type RuntimeTaskStep struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	Status    string `json:"status"`
-	Phase     string `json:"phase,omitempty"`
-	UpdatedAt string `json:"updated_at,omitempty"`
+	ID                   string              `json:"id"`
+	Title                string              `json:"title"`
+	Status               string              `json:"status"`
+	Phase                string              `json:"phase,omitempty"`
+	DependsOn            []string            `json:"depends_on,omitempty"`
+	CompletionConditions []string            `json:"completion_conditions,omitempty"`
+	ContextRefs          []string            `json:"context_refs,omitempty"`
+	Quality              *RuntimeStepQuality `json:"quality,omitempty"`
+	UpdatedAt            string              `json:"updated_at,omitempty"`
 }
 
 // RuntimeTaskSummary 是任务列表项与任务详情共用的摘要视图。
@@ -89,6 +100,7 @@ type RuntimeTaskSummary struct {
 	CurrentStep        *RuntimeTaskStep `json:"current_step,omitempty"`
 	CompletedStepCount int              `json:"completed_step_count"`
 	StepCount          int              `json:"step_count"`
+	ReadyStepCount     int              `json:"ready_step_count"`
 	UpdatedAt          string           `json:"updated_at"`
 	CreatedAt          string           `json:"created_at,omitempty"`
 	TemplateID         string           `json:"template_id,omitempty"`
@@ -454,6 +466,10 @@ func (p runtimeParser) parseTaskListItem(field string, task map[string]any) (Run
 	if err != nil {
 		return RuntimeTaskSummary{}, err
 	}
+	readyStepCount, err := p.optionalInt(field+".ready_step_count", task["ready_step_count"])
+	if err != nil {
+		return RuntimeTaskSummary{}, err
+	}
 	eventCount, err := p.optionalInt(field+".event_count", task["event_count"])
 	if err != nil {
 		return RuntimeTaskSummary{}, err
@@ -489,7 +505,7 @@ func (p runtimeParser) parseTaskListItem(field string, task map[string]any) (Run
 	return RuntimeTaskSummary{
 		ID: id, Title: title, Goal: goal, Status: status, Phase: phase, ReviewStatus: reviewStatus,
 		Summary: summary, Blocker: blocker, CurrentStep: currentStep,
-		CompletedStepCount: completedSteps, StepCount: stepCount,
+		CompletedStepCount: completedSteps, StepCount: stepCount, ReadyStepCount: readyStepCount,
 		UpdatedAt: updatedAt, CreatedAt: createdAt, EventCount: eventCount,
 	}, nil
 }
@@ -640,34 +656,40 @@ func parseRuntimeTaskDetail(node, taskID string, payload map[string]any) (Runtim
 		return RuntimeTaskDetail{}, err
 	}
 
-	// 当前步骤：优先第一个进行中的步骤，否则第一个待执行步骤，与上游摘要规则一致。
+	// 当前步骤：优先第一个进行中的步骤；否则只选择依赖已满足的 ready 步骤。
+	// blocked/completed 任务不暴露 ready frontier，与 AgentDock taskstate.ReadyStepIDs 一致。
 	completedSteps := 0
-	var current, pending *RuntimeTaskStep
+	completedIDs := make(map[string]struct{}, len(steps))
+	var current *RuntimeTaskStep
 	for i := range steps {
-		switch steps[i].Status {
-		case "completed":
+		if steps[i].Status == "completed" {
 			completedSteps++
-		case "in_progress":
+			completedIDs[steps[i].ID] = struct{}{}
+		}
+		if steps[i].Status == "in_progress" && current == nil {
+			step := steps[i]
+			current = &step
+		}
+	}
+	readyStepCount := 0
+	if status == "active" {
+		for i := range steps {
+			if steps[i].Status != "pending" || !runtimeTaskStepReady(steps[i], completedIDs) {
+				continue
+			}
+			readyStepCount++
 			if current == nil {
 				step := steps[i]
 				current = &step
 			}
-		case "pending":
-			if pending == nil {
-				step := steps[i]
-				pending = &step
-			}
 		}
-	}
-	if current == nil {
-		current = pending
 	}
 
 	return RuntimeTaskDetail{
 		Summary: RuntimeTaskSummary{
 			ID: id, Title: title, Goal: goal, Status: status, Phase: phase, ReviewStatus: reviewStatus,
 			Summary: summaryText, Blocker: blocker, CurrentStep: current,
-			CompletedStepCount: completedSteps, StepCount: len(steps),
+			CompletedStepCount: completedSteps, StepCount: len(steps), ReadyStepCount: readyStepCount,
 			UpdatedAt: updatedAt, CreatedAt: createdAt,
 			TemplateID: templateID, TemplateVersion: templateVersion,
 			ConditionCount: len(conditions), EventCount: len(events),
@@ -677,6 +699,15 @@ func parseRuntimeTaskDetail(node, taskID string, payload map[string]any) (Runtim
 		Events:      events,
 		FinalReview: finalReview,
 	}, nil
+}
+
+func runtimeTaskStepReady(step RuntimeTaskStep, completedIDs map[string]struct{}) bool {
+	for _, dependency := range step.DependsOn {
+		if _, completed := completedIDs[dependency]; !completed {
+			return false
+		}
+	}
+	return true
 }
 
 // parseTaskStep 解析完整步骤对象；id/status 是上游进度语义的必填字段。
@@ -697,11 +728,64 @@ func (p runtimeParser) parseTaskStep(field string, step map[string]any) (Runtime
 	if err != nil {
 		return RuntimeTaskStep{}, err
 	}
+	dependsOn, err := p.optionalStringArray(field+".depends_on", step["depends_on"])
+	if err != nil {
+		return RuntimeTaskStep{}, err
+	}
+	completionConditions, err := p.optionalStringArray(field+".completion_conditions", step["completion_conditions"])
+	if err != nil {
+		return RuntimeTaskStep{}, err
+	}
+	contextRefs, err := p.optionalStringArray(field+".context_refs", step["context_refs"])
+	if err != nil {
+		return RuntimeTaskStep{}, err
+	}
+	quality, err := p.parseOptionalStepQuality(field+".quality", step["quality"])
+	if err != nil {
+		return RuntimeTaskStep{}, err
+	}
 	updatedAt, err := p.optionalString(field+".updated_at", step["updated_at"])
 	if err != nil {
 		return RuntimeTaskStep{}, err
 	}
-	return RuntimeTaskStep{ID: id, Title: title, Status: status, Phase: phase, UpdatedAt: updatedAt}, nil
+	return RuntimeTaskStep{ID: id, Title: title, Status: status, Phase: phase, DependsOn: dependsOn, CompletionConditions: completionConditions, ContextRefs: contextRefs, Quality: quality, UpdatedAt: updatedAt}, nil
+}
+
+func (p runtimeParser) parseOptionalStepQuality(field string, value any) (*RuntimeStepQuality, error) {
+	quality, err := p.object(field, value, true)
+	if err != nil || quality == nil {
+		return nil, err
+	}
+	kind, err := p.requiredString(field+".kind", quality["kind"])
+	if err != nil {
+		return nil, err
+	}
+	outcome, err := p.requiredString(field+".outcome", quality["outcome"])
+	if err != nil {
+		return nil, err
+	}
+	group, err := p.optionalString(field+".refactor_group", quality["refactor_group"])
+	if err != nil {
+		return nil, err
+	}
+	reasons := map[string]string{}
+	if raw := quality["dependency_reasons"]; raw != nil {
+		obj, err := p.object(field+".dependency_reasons", raw, false)
+		if err != nil {
+			return nil, err
+		}
+		for key, rawValue := range obj {
+			reason, ok := rawValue.(string)
+			if !ok {
+				return nil, p.fail(field+".dependency_reasons."+key, "must be a string")
+			}
+			reasons[key] = reason
+		}
+	}
+	if len(reasons) == 0 {
+		reasons = nil
+	}
+	return &RuntimeStepQuality{Kind: kind, Outcome: outcome, RefactorGroup: group, DependencyReasons: reasons}, nil
 }
 
 // parseOptionalTaskStep 解析列表项里的 current_step（只含 id/title/status），缺失或为 null 时返回 nil。
@@ -725,7 +809,27 @@ func (p runtimeParser) parseOptionalTaskStep(field string, value any) (*RuntimeT
 	if err != nil {
 		return nil, err
 	}
-	return &RuntimeTaskStep{ID: id, Title: title, Status: status}, nil
+	phase, err := p.optionalString(field+".phase", step["phase"])
+	if err != nil {
+		return nil, err
+	}
+	dependsOn, err := p.optionalStringArray(field+".depends_on", step["depends_on"])
+	if err != nil {
+		return nil, err
+	}
+	conditions, err := p.optionalStringArray(field+".completion_conditions", step["completion_conditions"])
+	if err != nil {
+		return nil, err
+	}
+	refs, err := p.optionalStringArray(field+".context_refs", step["context_refs"])
+	if err != nil {
+		return nil, err
+	}
+	quality, err := p.parseOptionalStepQuality(field+".quality", step["quality"])
+	if err != nil {
+		return nil, err
+	}
+	return &RuntimeTaskStep{ID: id, Title: title, Status: status, Phase: phase, DependsOn: dependsOn, CompletionConditions: conditions, ContextRefs: refs, Quality: quality}, nil
 }
 
 func (p runtimeParser) parseTaskCondition(field string, condition map[string]any) (RuntimeTaskCondition, error) {

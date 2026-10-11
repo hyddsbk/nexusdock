@@ -24,12 +24,23 @@ const (
 // 以下结构体是 Runtime 视图的 UI API JSON 形状。字段值全部来自 internal/agentdock
 // 解析出的 DTO，本包不再接触 AgentDock 上游的动态 map 结构。
 
+type runtimeStepQuality struct {
+	Kind              string            `json:"kind"`
+	Outcome           string            `json:"outcome"`
+	RefactorGroup     string            `json:"refactor_group,omitempty"`
+	DependencyReasons map[string]string `json:"dependency_reasons,omitempty"`
+}
+
 type runtimeTaskStep struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	Status    string `json:"status"`
-	Phase     string `json:"phase,omitempty"`
-	UpdatedAt string `json:"updated_at,omitempty"`
+	ID                   string              `json:"id"`
+	Title                string              `json:"title"`
+	Status               string              `json:"status"`
+	Phase                string              `json:"phase,omitempty"`
+	DependsOn            []string            `json:"depends_on,omitempty"`
+	CompletionConditions []string            `json:"completion_conditions,omitempty"`
+	ContextRefs          []string            `json:"context_refs,omitempty"`
+	Quality              *runtimeStepQuality `json:"quality,omitempty"`
+	UpdatedAt            string              `json:"updated_at,omitempty"`
 }
 
 type runtimeTaskSummary struct {
@@ -44,6 +55,7 @@ type runtimeTaskSummary struct {
 	CurrentStep        *runtimeTaskStep `json:"current_step,omitempty"`
 	CompletedStepCount int              `json:"completed_step_count"`
 	StepCount          int              `json:"step_count"`
+	ReadyStepCount     int              `json:"ready_step_count"`
 	UpdatedAt          string           `json:"updated_at"`
 	CreatedAt          string           `json:"created_at"`
 	TemplateID         string           `json:"template_id,omitempty"`
@@ -65,16 +77,22 @@ type runtimeTaskEvent struct {
 	CreatedAt string `json:"created_at,omitempty"`
 }
 
+type runtimeOutcomeAxis struct {
+	Status   string   `json:"status"`
+	Evidence []string `json:"evidence,omitempty"`
+	Findings []string `json:"findings,omitempty"`
+}
+
 type runtimeTaskFinalReview struct {
-	IntentSpec        *agentdock.RuntimeOutcomeAxis `json:"intent_spec,omitempty"`
-	EngineeringPolicy *agentdock.RuntimeOutcomeAxis `json:"engineering_policy,omitempty"`
-	Status            string                        `json:"status"`
-	Summary           string                        `json:"summary,omitempty"`
-	VerifiedFacts     []string                      `json:"verified_facts,omitempty"`
-	OpenRisks         []string                      `json:"open_risks,omitempty"`
-	MissingChecks     []string                      `json:"missing_checks,omitempty"`
-	ReviewRevision    string                        `json:"review_revision"`
-	ReviewedAt        string                        `json:"reviewed_at,omitempty"`
+	IntentSpec        *runtimeOutcomeAxis `json:"intent_spec,omitempty"`
+	EngineeringPolicy *runtimeOutcomeAxis `json:"engineering_policy,omitempty"`
+	Status            string              `json:"status"`
+	Summary           string              `json:"summary,omitempty"`
+	VerifiedFacts     []string            `json:"verified_facts,omitempty"`
+	OpenRisks         []string            `json:"open_risks,omitempty"`
+	MissingChecks     []string            `json:"missing_checks,omitempty"`
+	ReviewRevision    string              `json:"review_revision"`
+	ReviewedAt        string              `json:"reviewed_at,omitempty"`
 }
 
 type runtimeTaskDetail struct {
@@ -304,7 +322,10 @@ func (s *Server) runtimeSkillFile(w http.ResponseWriter, r *http.Request) {
 func runtimeTaskSummaryView(task agentdock.RuntimeTaskSummary) runtimeTaskSummary {
 	var currentStep *runtimeTaskStep
 	if task.CurrentStep != nil {
-		currentStep = &runtimeTaskStep{ID: task.CurrentStep.ID, Title: task.CurrentStep.Title, Status: task.CurrentStep.Status}
+		currentStep = &runtimeTaskStep{ID: task.CurrentStep.ID, Title: task.CurrentStep.Title, Status: task.CurrentStep.Status, Phase: task.CurrentStep.Phase, DependsOn: append([]string(nil), task.CurrentStep.DependsOn...), CompletionConditions: append([]string(nil), task.CurrentStep.CompletionConditions...), ContextRefs: append([]string(nil), task.CurrentStep.ContextRefs...)}
+		if task.CurrentStep.Quality != nil {
+			currentStep.Quality = &runtimeStepQuality{Kind: task.CurrentStep.Quality.Kind, Outcome: task.CurrentStep.Quality.Outcome, RefactorGroup: task.CurrentStep.Quality.RefactorGroup, DependencyReasons: task.CurrentStep.Quality.DependencyReasons}
+		}
 	}
 	return runtimeTaskSummary{
 		ID:                 task.ID,
@@ -318,6 +339,7 @@ func runtimeTaskSummaryView(task agentdock.RuntimeTaskSummary) runtimeTaskSummar
 		CurrentStep:        currentStep,
 		CompletedStepCount: task.CompletedStepCount,
 		StepCount:          task.StepCount,
+		ReadyStepCount:     task.ReadyStepCount,
 		UpdatedAt:          task.UpdatedAt,
 		CreatedAt:          task.CreatedAt,
 		TemplateID:         task.TemplateID,
@@ -331,7 +353,11 @@ func runtimeTaskSummaryView(task agentdock.RuntimeTaskSummary) runtimeTaskSummar
 func runtimeTaskDetailView(detail agentdock.RuntimeTaskDetail) runtimeTaskDetail {
 	steps := make([]runtimeTaskStep, 0, len(detail.Steps))
 	for _, step := range detail.Steps {
-		steps = append(steps, runtimeTaskStep{ID: step.ID, Title: step.Title, Status: step.Status, Phase: step.Phase, UpdatedAt: step.UpdatedAt})
+		item := runtimeTaskStep{ID: step.ID, Title: step.Title, Status: step.Status, Phase: step.Phase, DependsOn: append([]string(nil), step.DependsOn...), CompletionConditions: append([]string(nil), step.CompletionConditions...), ContextRefs: append([]string(nil), step.ContextRefs...), UpdatedAt: step.UpdatedAt}
+		if step.Quality != nil {
+			item.Quality = &runtimeStepQuality{Kind: step.Quality.Kind, Outcome: step.Quality.Outcome, RefactorGroup: step.Quality.RefactorGroup, DependencyReasons: step.Quality.DependencyReasons}
+		}
+		steps = append(steps, item)
 	}
 	conditions := make([]runtimeTaskCondition, 0, len(detail.Conditions))
 	for _, condition := range detail.Conditions {
@@ -349,7 +375,7 @@ func runtimeTaskDetailView(detail agentdock.RuntimeTaskDetail) runtimeTaskDetail
 		Events:             events,
 	}
 	if detail.FinalReview != nil {
-		view.FinalReview = &runtimeTaskFinalReview{IntentSpec: detail.FinalReview.IntentSpec, EngineeringPolicy: detail.FinalReview.EngineeringPolicy,
+		review := &runtimeTaskFinalReview{
 			Status:         detail.FinalReview.Status,
 			Summary:        detail.FinalReview.Summary,
 			VerifiedFacts:  detail.FinalReview.VerifiedFacts,
@@ -358,6 +384,13 @@ func runtimeTaskDetailView(detail agentdock.RuntimeTaskDetail) runtimeTaskDetail
 			ReviewRevision: detail.FinalReview.ReviewRevision,
 			ReviewedAt:     detail.FinalReview.ReviewedAt,
 		}
+		if detail.FinalReview.IntentSpec != nil {
+			review.IntentSpec = &runtimeOutcomeAxis{Status: detail.FinalReview.IntentSpec.Status, Evidence: detail.FinalReview.IntentSpec.Evidence, Findings: detail.FinalReview.IntentSpec.Findings}
+		}
+		if detail.FinalReview.EngineeringPolicy != nil {
+			review.EngineeringPolicy = &runtimeOutcomeAxis{Status: detail.FinalReview.EngineeringPolicy.Status, Evidence: detail.FinalReview.EngineeringPolicy.Evidence, Findings: detail.FinalReview.EngineeringPolicy.Findings}
+		}
+		view.FinalReview = review
 	}
 	return view
 }

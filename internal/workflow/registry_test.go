@@ -180,6 +180,100 @@ func TestRegistryFilesRemainPrivate(t *testing.T) {
 	}
 }
 
+func TestPublishPersistsDependencyGraph(t *testing.T) {
+	registry := NewRegistry(t.TempDir())
+	template := testTemplate("development.dag", "1.0.0")
+	template.Steps = []Step{
+		{ID: "inspect", Title: "Inspect", Phase: "check", CompletionConditions: []string{"Current state is captured."}, ContextRefs: []string{"recall://project/baseline"}},
+		{ID: "implement", Title: "Implement", Phase: "execute", DependsOn: []string{"inspect"}, CompletionConditions: []string{"Requested change is implemented."}, ContextRefs: []string{"skill://domain-modeling/SKILL.md"}},
+		{ID: "verify", Title: "Verify", Phase: "verify", DependsOn: []string{"implement"}, CompletionConditions: []string{"Verification passes."}, ContextRefs: []string{"artifact://release-gate/latest"}},
+	}
+	published, err := registry.Publish(template)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(published.Steps[2].DependsOn) != 1 || published.Steps[2].DependsOn[0] != "implement" {
+		t.Fatalf("published dependency graph = %#v", published.Steps)
+	}
+	loaded, err := registry.Get(template.ID, template.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Steps[1].DependsOn) != 1 || loaded.Steps[1].DependsOn[0] != "inspect" {
+		t.Fatalf("loaded dependency graph = %#v", loaded.Steps)
+	}
+	if len(loaded.Steps[1].CompletionConditions) != 1 || loaded.Steps[1].CompletionConditions[0] != "Requested change is implemented." {
+		t.Fatalf("loaded step completion contract = %#v", loaded.Steps[1])
+	}
+	if len(loaded.Steps[1].ContextRefs) != 1 || loaded.Steps[1].ContextRefs[0] != "skill://domain-modeling/SKILL.md" {
+		t.Fatalf("loaded step context refs = %#v", loaded.Steps[1])
+	}
+	if loaded.Hash != templateHash(loaded) {
+		t.Fatalf("dependency-bearing template hash is stale: got %q want %q", loaded.Hash, templateHash(loaded))
+	}
+}
+
+func TestPublishRejectsDAGWithoutPerStepCompletionConditions(t *testing.T) {
+	registry := NewRegistry(t.TempDir())
+	template := testTemplate("development.missing-step-condition", "1.0.0")
+	template.Steps = []Step{
+		{ID: "inspect", Title: "Inspect", Phase: "check", CompletionConditions: []string{"Inspection is complete."}},
+		{ID: "implement", Title: "Implement", Phase: "execute", DependsOn: []string{"inspect"}},
+	}
+	_, err := registry.Publish(template)
+	if err == nil || !strings.Contains(err.Error(), "requires at least one completion condition") {
+		t.Fatalf("Publish() error = %v, want missing per-step completion condition", err)
+	}
+}
+
+func TestPublishRejectsInvalidStepContextContracts(t *testing.T) {
+	tests := []struct {
+		name string
+		step Step
+		want string
+	}{
+		{name: "duplicate_context_ref", step: Step{ID: "work", Title: "Work", Phase: "execute", ContextRefs: []string{"recall://a", "recall://a"}}, want: "duplicate context ref"},
+		{name: "blank_context_ref", step: Step{ID: "work", Title: "Work", Phase: "execute", ContextRefs: []string{" "}}, want: "invalid context ref"},
+		{name: "duplicate_condition", step: Step{ID: "work", Title: "Work", Phase: "execute", CompletionConditions: []string{"Done", "Done"}}, want: "non-empty and distinct"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry := NewRegistry(t.TempDir())
+			template := testTemplate("development.step-contract."+tt.name, "1.0.0")
+			template.Steps = []Step{tt.step}
+			_, err := registry.Publish(template)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Publish() error = %v, want substring %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestPublishRejectsInvalidDependencyGraphs(t *testing.T) {
+	tests := []struct {
+		name  string
+		steps []Step
+		want  string
+	}{
+		{name: "unknown", steps: []Step{{ID: "a", Title: "A", Phase: "execute", DependsOn: []string{"missing"}}}, want: "unknown step"},
+		{name: "self", steps: []Step{{ID: "a", Title: "A", Phase: "execute", DependsOn: []string{"a"}}}, want: "cannot depend on itself"},
+		{name: "duplicate", steps: []Step{{ID: "a", Title: "A", Phase: "execute"}, {ID: "b", Title: "B", Phase: "execute", DependsOn: []string{"a", "a"}}}, want: "duplicate dependency"},
+		{name: "whitespace", steps: []Step{{ID: "a", Title: "A", Phase: "execute"}, {ID: "b", Title: "B", Phase: "execute", DependsOn: []string{" a"}}}, want: "invalid dependency"},
+		{name: "cycle", steps: []Step{{ID: "a", Title: "A", Phase: "execute", DependsOn: []string{"b"}}, {ID: "b", Title: "B", Phase: "execute", DependsOn: []string{"a"}}}, want: "contains a cycle"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry := NewRegistry(t.TempDir())
+			template := testTemplate("development.invalid."+tt.name, "1.0.0")
+			template.Steps = tt.steps
+			_, err := registry.Publish(template)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Publish() error = %v, want substring %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func testTemplate(id, version string) Template {
 	return Template{
 		ID:          id,

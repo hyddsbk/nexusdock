@@ -32,10 +32,22 @@ type MatchRule struct {
 }
 
 // Step 是模板中的一个执行步骤；Phase 用于把步骤归入检查/执行/验证/收尾阶段。
+type StepQuality struct {
+	Kind              string            `json:"kind"`
+	Outcome           string            `json:"outcome"`
+	RefactorGroup     string            `json:"refactor_group,omitempty"`
+	DependencyReasons map[string]string `json:"dependency_reasons,omitempty"`
+}
+
+// Step 是模板中的一个执行步骤；Phase 用于把步骤归入检查/执行/验证/收尾阶段。
 type Step struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
-	Phase string `json:"phase"`
+	ID                   string       `json:"id"`
+	Title                string       `json:"title"`
+	Phase                string       `json:"phase"`
+	DependsOn            []string     `json:"depends_on,omitempty"`
+	CompletionConditions []string     `json:"completion_conditions,omitempty"`
+	ContextRefs          []string     `json:"context_refs,omitempty"`
+	Quality              *StepQuality `json:"quality,omitempty"`
 }
 
 // Contract 描述一个 Workflow 与相邻 Skill/能力之间的稳定边界。
@@ -113,7 +125,297 @@ func validateTemplate(t Template) error {
 		}
 		seen[step.ID] = true
 	}
+	if err := validateStepDependencies(t.Steps); err != nil {
+		return err
+	}
+	if err := validateStepContracts(t.Steps); err != nil {
+		return err
+	}
+	if err := validateStepQuality(t.Steps); err != nil {
+		return err
+	}
 	return nil
+}
+
+func validateStepDependencies(steps []Step) error {
+	known := make(map[string]struct{}, len(steps))
+	byID := make(map[string]Step, len(steps))
+	for _, step := range steps {
+		known[step.ID] = struct{}{}
+		byID[step.ID] = step
+	}
+	for _, step := range steps {
+		seen := make(map[string]struct{}, len(step.DependsOn))
+		for _, rawDependency := range step.DependsOn {
+			dependency := strings.TrimSpace(rawDependency)
+			if dependency != rawDependency || !ValidToken(dependency) {
+				return fmt.Errorf("step %s has invalid dependency %q", step.ID, rawDependency)
+			}
+			if dependency == step.ID {
+				return fmt.Errorf("step %s cannot depend on itself", step.ID)
+			}
+			if _, exists := known[dependency]; !exists {
+				return fmt.Errorf("step %s depends on unknown step %q", step.ID, dependency)
+			}
+			if _, duplicate := seen[dependency]; duplicate {
+				return fmt.Errorf("step %s has duplicate dependency %q", step.ID, dependency)
+			}
+			seen[dependency] = struct{}{}
+		}
+	}
+
+	state := make(map[string]uint8, len(steps))
+	var visit func(string) error
+	visit = func(id string) error {
+		switch state[id] {
+		case 1:
+			return fmt.Errorf("workflow dependency graph contains a cycle at step %q", id)
+		case 2:
+			return nil
+		}
+		state[id] = 1
+		for _, dependency := range byID[id].DependsOn {
+			if err := visit(dependency); err != nil {
+				return err
+			}
+		}
+		state[id] = 2
+		return nil
+	}
+	for _, step := range steps {
+		if err := visit(step.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+const maxStepCompletionConditions = 4
+const maxStepContextRefs = 8
+const maxStepCompletionConditionRunes = 240
+const maxStepContextRefRunes = 512
+
+func validateStepContracts(steps []Step) error {
+	hasDAG := false
+	for _, step := range steps {
+		if len(step.DependsOn) > 0 {
+			hasDAG = true
+		}
+		if len(step.CompletionConditions) > maxStepCompletionConditions {
+			return fmt.Errorf("step %s has %d completion conditions; max %d", step.ID, len(step.CompletionConditions), maxStepCompletionConditions)
+		}
+		normalizedConditions := normalizeTexts(step.CompletionConditions)
+		if len(normalizedConditions) != len(step.CompletionConditions) {
+			return fmt.Errorf("step %s completion_conditions must be non-empty and distinct", step.ID)
+		}
+		for _, condition := range step.CompletionConditions {
+			if strings.TrimSpace(condition) != condition || len([]rune(condition)) > maxStepCompletionConditionRunes {
+				return fmt.Errorf("step %s has invalid completion condition", step.ID)
+			}
+		}
+		if len(step.ContextRefs) > maxStepContextRefs {
+			return fmt.Errorf("step %s has %d context refs; max %d", step.ID, len(step.ContextRefs), maxStepContextRefs)
+		}
+		seenRefs := make(map[string]struct{}, len(step.ContextRefs))
+		for _, ref := range step.ContextRefs {
+			trimmed := strings.TrimSpace(ref)
+			if trimmed == "" || trimmed != ref || strings.ContainsAny(ref, "\r\n") || len([]rune(ref)) > maxStepContextRefRunes {
+				return fmt.Errorf("step %s has invalid context ref %q", step.ID, ref)
+			}
+			if _, duplicate := seenRefs[ref]; duplicate {
+				return fmt.Errorf("step %s has duplicate context ref %q", step.ID, ref)
+			}
+			seenRefs[ref] = struct{}{}
+		}
+	}
+	if hasDAG {
+		for _, step := range steps {
+			if len(step.CompletionConditions) == 0 {
+				return fmt.Errorf("DAG step %s requires at least one completion condition", step.ID)
+			}
+		}
+	}
+	return nil
+}
+
+const (
+	StepKindDiscovery            = "discovery"
+	StepKindVerticalSlice        = "vertical_slice"
+	StepKindWideRefactorExpand   = "wide_refactor_expand"
+	StepKindWideRefactorMigrate  = "wide_refactor_migrate"
+	StepKindWideRefactorContract = "wide_refactor_contract"
+	StepKindVerification         = "verification"
+	StepKindRelease              = "release"
+	maxStepQualityOutcomeRunes   = 320
+	maxDependencyReasonRunes     = 240
+	maxRefactorGroupRunes        = 80
+)
+
+func validateStepQuality(steps []Step) error {
+	qualityEnabled := false
+	for _, step := range steps {
+		if step.Quality != nil {
+			qualityEnabled = true
+			break
+		}
+	}
+	if !qualityEnabled {
+		return nil
+	}
+	byID := make(map[string]Step, len(steps))
+	for _, step := range steps {
+		byID[step.ID] = step
+		if step.Quality == nil {
+			return fmt.Errorf("step quality contract is partial; step %s is missing quality", step.ID)
+		}
+		q := step.Quality
+		if !validStepKind(q.Kind) {
+			return fmt.Errorf("step %s has invalid quality kind %q", step.ID, q.Kind)
+		}
+		if q.Outcome == "" || strings.TrimSpace(q.Outcome) != q.Outcome || strings.ContainsAny(q.Outcome, "\r\n") || len([]rune(q.Outcome)) > maxStepQualityOutcomeRunes {
+			return fmt.Errorf("step %s has invalid quality outcome", step.ID)
+		}
+		wide := isWideRefactorKind(q.Kind)
+		if wide {
+			if q.RefactorGroup == "" || strings.TrimSpace(q.RefactorGroup) != q.RefactorGroup || len([]rune(q.RefactorGroup)) > maxRefactorGroupRunes || !ValidToken(q.RefactorGroup) {
+				return fmt.Errorf("step %s wide refactor quality requires a valid refactor_group", step.ID)
+			}
+		} else if q.RefactorGroup != "" {
+			return fmt.Errorf("step %s non-wide quality cannot set refactor_group", step.ID)
+		}
+		if len(step.CompletionConditions) == 0 {
+			return fmt.Errorf("quality-enabled step %s requires at least one completion condition", step.ID)
+		}
+		if len(q.DependencyReasons) != len(step.DependsOn) {
+			return fmt.Errorf("quality-enabled step %s must explain every dependency edge exactly once", step.ID)
+		}
+		for _, dependency := range step.DependsOn {
+			reason, ok := q.DependencyReasons[dependency]
+			if !ok {
+				return fmt.Errorf("quality-enabled step %s is missing dependency reason for %s", step.ID, dependency)
+			}
+			if reason == "" || strings.TrimSpace(reason) != reason || strings.ContainsAny(reason, "\r\n") || len([]rune(reason)) > maxDependencyReasonRunes {
+				return fmt.Errorf("step %s has invalid dependency reason for %s", step.ID, dependency)
+			}
+		}
+		for dependency, reason := range q.DependencyReasons {
+			if !ValidToken(dependency) || !containsString(step.DependsOn, dependency) {
+				return fmt.Errorf("quality-enabled step %s explains non-dependency %s", step.ID, dependency)
+			}
+			if reason == "" || strings.TrimSpace(reason) != reason || strings.ContainsAny(reason, "\r\n") || len([]rune(reason)) > maxDependencyReasonRunes {
+				return fmt.Errorf("step %s has invalid dependency reason for %s", step.ID, dependency)
+			}
+		}
+	}
+	if err := rejectRedundantDependencyEdges(steps); err != nil {
+		return err
+	}
+	return validateWideRefactorGroups(steps, byID)
+}
+
+func validStepKind(kind string) bool {
+	switch kind {
+	case StepKindDiscovery, StepKindVerticalSlice, StepKindWideRefactorExpand, StepKindWideRefactorMigrate, StepKindWideRefactorContract, StepKindVerification, StepKindRelease:
+		return true
+	default:
+		return false
+	}
+}
+
+func isWideRefactorKind(kind string) bool {
+	return kind == StepKindWideRefactorExpand || kind == StepKindWideRefactorMigrate || kind == StepKindWideRefactorContract
+}
+
+func rejectRedundantDependencyEdges(steps []Step) error {
+	byID := make(map[string]Step, len(steps))
+	for _, step := range steps {
+		byID[step.ID] = step
+	}
+	for _, step := range steps {
+		for _, dependency := range step.DependsOn {
+			for _, other := range step.DependsOn {
+				if other == dependency {
+					continue
+				}
+				if stepDependsTransitively(byID, other, dependency, map[string]bool{}) {
+					return fmt.Errorf("step %s has redundant dependency %s; it is already implied by %s", step.ID, dependency, other)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func stepDependsTransitively(byID map[string]Step, from, target string, seen map[string]bool) bool {
+	if from == target {
+		return true
+	}
+	if seen[from] {
+		return false
+	}
+	seen[from] = true
+	for _, dependency := range byID[from].DependsOn {
+		if stepDependsTransitively(byID, dependency, target, seen) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateWideRefactorGroups(steps []Step, byID map[string]Step) error {
+	type group struct{ expands, migrates, contracts []Step }
+	groups := map[string]*group{}
+	for _, step := range steps {
+		if !isWideRefactorKind(step.Quality.Kind) {
+			continue
+		}
+		g := groups[step.Quality.RefactorGroup]
+		if g == nil {
+			g = &group{}
+			groups[step.Quality.RefactorGroup] = g
+		}
+		switch step.Quality.Kind {
+		case StepKindWideRefactorExpand:
+			g.expands = append(g.expands, step)
+		case StepKindWideRefactorMigrate:
+			g.migrates = append(g.migrates, step)
+		case StepKindWideRefactorContract:
+			g.contracts = append(g.contracts, step)
+		}
+	}
+	for name, g := range groups {
+		if len(g.expands) == 0 || len(g.migrates) == 0 || len(g.contracts) != 1 {
+			return fmt.Errorf("wide refactor group %s requires at least one expand, at least one migrate, and exactly one contract step", name)
+		}
+		for _, migrate := range g.migrates {
+			downstream := false
+			for _, expand := range g.expands {
+				if stepDependsTransitively(byID, migrate.ID, expand.ID, map[string]bool{}) {
+					downstream = true
+					break
+				}
+			}
+			if !downstream {
+				return fmt.Errorf("wide refactor migrate step %s must depend on an expand step in group %s", migrate.ID, name)
+			}
+		}
+		contract := g.contracts[0]
+		for _, migrate := range g.migrates {
+			if !containsString(contract.DependsOn, migrate.ID) {
+				return fmt.Errorf("wide refactor contract step %s must directly depend on migrate step %s", contract.ID, migrate.ID)
+			}
+		}
+	}
+	return nil
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 const maxTemplateSteps = 8
