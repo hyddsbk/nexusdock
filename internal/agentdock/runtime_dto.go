@@ -87,6 +87,16 @@ type RuntimeDiagnosticEvidence struct {
 	EvidenceRefs []string `json:"evidence_refs,omitempty"`
 }
 
+type RuntimeTaskHandoff struct {
+	NextStepID      string   `json:"next_step_id,omitempty"`
+	ContextRefs     []string `json:"context_refs,omitempty"`
+	Risks           []string `json:"risks,omitempty"`
+	ContextRefCount int      `json:"context_ref_count,omitempty"`
+	RiskCount       int      `json:"risk_count,omitempty"`
+	Revision        string   `json:"revision"`
+	CreatedAt       string   `json:"created_at,omitempty"`
+}
+
 type RuntimeTaskStep struct {
 	ID                   string                     `json:"id"`
 	Title                string                     `json:"title"`
@@ -103,24 +113,25 @@ type RuntimeTaskStep struct {
 // RuntimeTaskSummary 是任务列表项与任务详情共用的摘要视图。
 // 列表项由上游直接给出计数；详情的计数由解析器按步骤/事件数组推导。
 type RuntimeTaskSummary struct {
-	ID                 string           `json:"id"`
-	Title              string           `json:"title"`
-	Goal               string           `json:"goal"`
-	Status             string           `json:"status"`
-	Phase              string           `json:"phase"`
-	ReviewStatus       string           `json:"review_status"`
-	Summary            string           `json:"summary,omitempty"`
-	Blocker            string           `json:"blocker,omitempty"`
-	CurrentStep        *RuntimeTaskStep `json:"current_step,omitempty"`
-	CompletedStepCount int              `json:"completed_step_count"`
-	StepCount          int              `json:"step_count"`
-	ReadyStepCount     int              `json:"ready_step_count"`
-	UpdatedAt          string           `json:"updated_at"`
-	CreatedAt          string           `json:"created_at,omitempty"`
-	TemplateID         string           `json:"template_id,omitempty"`
-	TemplateVersion    string           `json:"template_version,omitempty"`
-	ConditionCount     int              `json:"condition_count"`
-	EventCount         int              `json:"event_count"`
+	ID                 string              `json:"id"`
+	Title              string              `json:"title"`
+	Goal               string              `json:"goal"`
+	Status             string              `json:"status"`
+	Phase              string              `json:"phase"`
+	ReviewStatus       string              `json:"review_status"`
+	Summary            string              `json:"summary,omitempty"`
+	Blocker            string              `json:"blocker,omitempty"`
+	CurrentStep        *RuntimeTaskStep    `json:"current_step,omitempty"`
+	Handoff            *RuntimeTaskHandoff `json:"handoff,omitempty"`
+	CompletedStepCount int                 `json:"completed_step_count"`
+	StepCount          int                 `json:"step_count"`
+	ReadyStepCount     int                 `json:"ready_step_count"`
+	UpdatedAt          string              `json:"updated_at"`
+	CreatedAt          string              `json:"created_at,omitempty"`
+	TemplateID         string              `json:"template_id,omitempty"`
+	TemplateVersion    string              `json:"template_version,omitempty"`
+	ConditionCount     int                 `json:"condition_count"`
+	EventCount         int                 `json:"event_count"`
 }
 
 type RuntimeTaskCondition struct {
@@ -500,6 +511,10 @@ func (p runtimeParser) parseTaskListItem(field string, task map[string]any) (Run
 	if err != nil {
 		return RuntimeTaskSummary{}, err
 	}
+	handoff, err := p.parseOptionalTaskHandoff(field+".handoff", task["handoff"])
+	if err != nil {
+		return RuntimeTaskSummary{}, err
+	}
 	title, err := p.optionalString(field+".title", task["title"])
 	if err != nil {
 		return RuntimeTaskSummary{}, err
@@ -518,7 +533,7 @@ func (p runtimeParser) parseTaskListItem(field string, task map[string]any) (Run
 	}
 	return RuntimeTaskSummary{
 		ID: id, Title: title, Goal: goal, Status: status, Phase: phase, ReviewStatus: reviewStatus,
-		Summary: summary, Blocker: blocker, CurrentStep: currentStep,
+		Summary: summary, Blocker: blocker, CurrentStep: currentStep, Handoff: handoff,
 		CompletedStepCount: completedSteps, StepCount: stepCount, ReadyStepCount: readyStepCount,
 		UpdatedAt: updatedAt, CreatedAt: createdAt, EventCount: eventCount,
 	}, nil
@@ -600,6 +615,10 @@ func parseRuntimeTaskDetail(node, taskID string, payload map[string]any) (Runtim
 	}
 
 	finalReview, err := p.parseOptionalFinalReview("task.final_review", task["final_review"])
+	if err != nil {
+		return RuntimeTaskDetail{}, err
+	}
+	handoff, err := p.parseOptionalTaskHandoff("task.handoff", task["handoff"])
 	if err != nil {
 		return RuntimeTaskDetail{}, err
 	}
@@ -702,7 +721,7 @@ func parseRuntimeTaskDetail(node, taskID string, payload map[string]any) (Runtim
 	return RuntimeTaskDetail{
 		Summary: RuntimeTaskSummary{
 			ID: id, Title: title, Goal: goal, Status: status, Phase: phase, ReviewStatus: reviewStatus,
-			Summary: summaryText, Blocker: blocker, CurrentStep: current,
+			Summary: summaryText, Blocker: blocker, CurrentStep: current, Handoff: handoff,
 			CompletedStepCount: completedSteps, StepCount: len(steps), ReadyStepCount: readyStepCount,
 			UpdatedAt: updatedAt, CreatedAt: createdAt,
 			TemplateID: templateID, TemplateVersion: templateVersion,
@@ -712,6 +731,49 @@ func parseRuntimeTaskDetail(node, taskID string, payload map[string]any) (Runtim
 		Steps:       steps,
 		Events:      events,
 		FinalReview: finalReview,
+	}, nil
+}
+
+func (p runtimeParser) parseOptionalTaskHandoff(field string, value any) (*RuntimeTaskHandoff, error) {
+	handoff, err := p.object(field, value, true)
+	if err != nil || handoff == nil {
+		return nil, err
+	}
+	nextStepID, err := p.optionalString(field+".next_step_id", handoff["next_step_id"])
+	if err != nil {
+		return nil, err
+	}
+	contextRefs, err := p.optionalStringArray(field+".context_refs", handoff["context_refs"])
+	if err != nil {
+		return nil, err
+	}
+	risks, err := p.optionalStringArray(field+".risks", handoff["risks"])
+	if err != nil {
+		return nil, err
+	}
+	contextRefCount, err := p.optionalInt(field+".context_ref_count", handoff["context_ref_count"])
+	if err != nil {
+		return nil, err
+	}
+	riskCount, err := p.optionalInt(field+".risk_count", handoff["risk_count"])
+	if err != nil {
+		return nil, err
+	}
+	revision, err := p.requiredString(field+".revision", handoff["revision"])
+	if err != nil {
+		return nil, err
+	}
+	createdAt, err := p.optionalString(field+".created_at", handoff["created_at"])
+	if err != nil {
+		return nil, err
+	}
+	if contextRefCount < 0 || riskCount < 0 {
+		return nil, p.fail(field, "handoff counts must be non-negative")
+	}
+	return &RuntimeTaskHandoff{
+		NextStepID: nextStepID, ContextRefs: contextRefs, Risks: risks,
+		ContextRefCount: contextRefCount, RiskCount: riskCount,
+		Revision: revision, CreatedAt: createdAt,
 	}, nil
 }
 

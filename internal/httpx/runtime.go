@@ -44,6 +44,16 @@ type runtimeDiagnosticEvidence struct {
 	EvidenceRefs []string `json:"evidence_refs,omitempty"`
 }
 
+type runtimeTaskHandoff struct {
+	NextStepID      string   `json:"next_step_id,omitempty"`
+	ContextRefs     []string `json:"context_refs,omitempty"`
+	Risks           []string `json:"risks,omitempty"`
+	ContextRefCount int      `json:"context_ref_count,omitempty"`
+	RiskCount       int      `json:"risk_count,omitempty"`
+	Revision        string   `json:"revision"`
+	CreatedAt       string   `json:"created_at,omitempty"`
+}
+
 type runtimeTaskStep struct {
 	ID                   string                     `json:"id"`
 	Title                string                     `json:"title"`
@@ -58,25 +68,26 @@ type runtimeTaskStep struct {
 }
 
 type runtimeTaskSummary struct {
-	ID                 string           `json:"id"`
-	Title              string           `json:"title"`
-	Goal               string           `json:"goal"`
-	Status             string           `json:"status"`
-	Phase              string           `json:"phase"`
-	ReviewStatus       string           `json:"review_status"`
-	Summary            string           `json:"summary,omitempty"`
-	Blocker            string           `json:"blocker,omitempty"`
-	CurrentStep        *runtimeTaskStep `json:"current_step,omitempty"`
-	CompletedStepCount int              `json:"completed_step_count"`
-	StepCount          int              `json:"step_count"`
-	ReadyStepCount     int              `json:"ready_step_count"`
-	UpdatedAt          string           `json:"updated_at"`
-	CreatedAt          string           `json:"created_at"`
-	TemplateID         string           `json:"template_id,omitempty"`
-	TemplateVersion    string           `json:"template_version,omitempty"`
-	ConditionCount     int              `json:"condition_count"`
-	EventCount         int              `json:"event_count"`
-	FileName           string           `json:"file_name"`
+	ID                 string              `json:"id"`
+	Title              string              `json:"title"`
+	Goal               string              `json:"goal"`
+	Status             string              `json:"status"`
+	Phase              string              `json:"phase"`
+	ReviewStatus       string              `json:"review_status"`
+	Summary            string              `json:"summary,omitempty"`
+	Blocker            string              `json:"blocker,omitempty"`
+	CurrentStep        *runtimeTaskStep    `json:"current_step,omitempty"`
+	Handoff            *runtimeTaskHandoff `json:"handoff,omitempty"`
+	CompletedStepCount int                 `json:"completed_step_count"`
+	StepCount          int                 `json:"step_count"`
+	ReadyStepCount     int                 `json:"ready_step_count"`
+	UpdatedAt          string              `json:"updated_at"`
+	CreatedAt          string              `json:"created_at"`
+	TemplateID         string              `json:"template_id,omitempty"`
+	TemplateVersion    string              `json:"template_version,omitempty"`
+	ConditionCount     int                 `json:"condition_count"`
+	EventCount         int                 `json:"event_count"`
+	FileName           string              `json:"file_name"`
 }
 
 type runtimeTaskCondition struct {
@@ -343,6 +354,17 @@ func runtimeDiagnosticEvidenceView(value *agentdock.RuntimeDiagnosticEvidence) *
 	}
 }
 
+func runtimeTaskHandoffView(value *agentdock.RuntimeTaskHandoff) *runtimeTaskHandoff {
+	if value == nil {
+		return nil
+	}
+	return &runtimeTaskHandoff{
+		NextStepID: value.NextStepID, ContextRefs: append([]string(nil), value.ContextRefs...),
+		Risks: append([]string(nil), value.Risks...), ContextRefCount: value.ContextRefCount,
+		RiskCount: value.RiskCount, Revision: value.Revision, CreatedAt: value.CreatedAt,
+	}
+}
+
 // runtimeTaskSummaryView 把上游任务 DTO 映射成 UI API 摘要；file_name 是 UI 侧任务文件名，等于任务 ID。
 func runtimeTaskSummaryView(task agentdock.RuntimeTaskSummary) runtimeTaskSummary {
 	var currentStep *runtimeTaskStep
@@ -363,6 +385,7 @@ func runtimeTaskSummaryView(task agentdock.RuntimeTaskSummary) runtimeTaskSummar
 		Summary:            task.Summary,
 		Blocker:            task.Blocker,
 		CurrentStep:        currentStep,
+		Handoff:            runtimeTaskHandoffView(task.Handoff),
 		CompletedStepCount: task.CompletedStepCount,
 		StepCount:          task.StepCount,
 		ReadyStepCount:     task.ReadyStepCount,
