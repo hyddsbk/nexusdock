@@ -10,7 +10,7 @@ import (
 // CurrentSchemaVersion 是当前程序对应的控制库 Schema 版本。
 // PRAGMA user_version 是唯一的应用 Schema 版本来源，不引入 schema_migrations 表，
 // 避免恢复 a923781 已移除的旧文件式迁移系统（SQL 文件 + checksum 校验 + 备份钩子的复杂度）。
-const CurrentSchemaVersion = 4
+const CurrentSchemaVersion = 5
 
 // currentSchema 是全新空库初始化用的当前结构。
 // 空库没有历史数据需要逐版本变换，直接建当前结构并写入版本号：
@@ -201,6 +201,19 @@ END`,
 	`CREATE TABLE IF NOT EXISTS agentdock_bridge_capabilities (
     node_id TEXT PRIMARY KEY,
     capabilities_json TEXT NOT NULL DEFAULT '[]',
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (node_id) REFERENCES agentdock_devices(id) ON DELETE CASCADE
+)`,
+	`CREATE TABLE IF NOT EXISTS agentdock_audit_trust_checkpoints (
+    node_id TEXT PRIMARY KEY,
+    device_id TEXT NOT NULL,
+    root_key_id TEXT NOT NULL,
+    registry_revision INTEGER NOT NULL CHECK (registry_revision > 0),
+    registry_sha256 TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    fresh_until TEXT NOT NULL,
+    checkpoint_json TEXT NOT NULL,
+    registry_json TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (node_id) REFERENCES agentdock_devices(id) ON DELETE CASCADE
 )`,

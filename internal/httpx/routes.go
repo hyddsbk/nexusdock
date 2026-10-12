@@ -56,6 +56,7 @@ func (s *Server) Handler() http.Handler {
 	// 共享数据域：已启用的 AgentDock Device Token 与管理员 Web Session 均可访问。
 	r.Group(func(r chi.Router) {
 		r.Use(s.withDeviceOrAPIAccess)
+		r.Get("/v1/trust-checkpoints/{nodeID}", s.agentDockTrustCheckpointGet)
 		s.registerWorkflowTemplateRoutes(r)
 		if s.privateNotes != nil {
 			s.registerPrivateNoteRoutes(r)

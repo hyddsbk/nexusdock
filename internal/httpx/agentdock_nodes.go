@@ -25,6 +25,7 @@ func (s *Server) registerAgentDockConnectionRoutes(r chi.Router) {
 	// 因此协议路径一旦变化会由回归测试立即暴露，而不是让两份路径静默漂移。
 	r.Post("/v1/nodes/pair", s.agentDockNodePair)
 	r.Get("/v1/nodes/connect", s.agentDockNodeConnect)
+	r.Put("/v1/nodes/trust-checkpoint", s.agentDockTrustCheckpointPublish)
 }
 
 func (s *Server) agentDockNodeList(w http.ResponseWriter, r *http.Request) {

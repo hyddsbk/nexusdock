@@ -299,4 +299,23 @@ END`,
 			`CREATE INDEX IF NOT EXISTS idx_runtime_workspaces_node ON runtime_workspaces(node_id, name COLLATE NOCASE)`,
 		},
 	},
+	{
+		version: 5,
+		name:    "新增 AgentDock Audit Trust Checkpoint",
+		statements: []string{
+			`CREATE TABLE IF NOT EXISTS agentdock_audit_trust_checkpoints (
+    node_id TEXT PRIMARY KEY,
+    device_id TEXT NOT NULL,
+    root_key_id TEXT NOT NULL,
+    registry_revision INTEGER NOT NULL CHECK (registry_revision > 0),
+    registry_sha256 TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    fresh_until TEXT NOT NULL,
+    checkpoint_json TEXT NOT NULL,
+    registry_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (node_id) REFERENCES agentdock_devices(id) ON DELETE CASCADE
+)`,
+		},
+	},
 }
