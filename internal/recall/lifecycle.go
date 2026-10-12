@@ -71,6 +71,7 @@ type LifecycleRecord struct {
 type LifecycleQuery struct {
 	Query       string   `json:"query"`
 	EvolutionID string   `json:"evolution_id,omitempty"`
+	EvidenceRef string   `json:"evidence_ref,omitempty"`
 	Statuses    []string `json:"statuses,omitempty"`
 	Types       []string `json:"types,omitempty"`
 	Scope       string   `json:"scope,omitempty"`
@@ -96,8 +97,12 @@ type LifecycleTransitionResult struct {
 func (s *Store) QueryLifecycle(query LifecycleQuery) ([]LifecycleRecord, error) {
 	query.EvolutionID = strings.TrimSpace(query.EvolutionID)
 	query.Query = strings.TrimSpace(query.Query)
+	query.EvidenceRef = strings.TrimSpace(query.EvidenceRef)
 	if query.EvolutionID != "" && !lifecycleIDPattern.MatchString(query.EvolutionID) {
 		return nil, errors.New("invalid evolution_id")
+	}
+	if query.EvidenceRef != "" && (len(query.EvidenceRef) > 512 || strings.ContainsAny(query.EvidenceRef, "\r\n")) {
+		return nil, errors.New("invalid evidence_ref")
 	}
 	limit := query.Limit
 	if limit <= 0 || limit > maxLifecycleRecords {
@@ -404,6 +409,18 @@ func lifecycleHardMatches(record LifecycleRecord, query LifecycleQuery) bool {
 	}
 	if query.Device != "" && !strings.EqualFold(query.Device, record.Device) {
 		return false
+	}
+	if query.EvidenceRef != "" {
+		matched := false
+		for _, evidence := range record.Evidence {
+			if evidence.Ref == query.EvidenceRef {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
 	}
 	return true
 }

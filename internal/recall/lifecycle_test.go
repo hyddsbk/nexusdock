@@ -175,3 +175,34 @@ func TestLifecycleQueryMatchesChineseWithoutWhitespace(t *testing.T) {
 		t.Fatalf("Chinese query did not recall relevant record: %#v", items)
 	}
 }
+
+func TestLifecycleQueryFiltersExactEvidenceRef(t *testing.T) {
+	store := newTestStore(t)
+	for i, record := range []LifecycleRecord{
+		{
+			EvolutionID: "evo_7777777777777777", Title: "one", Statement: "first evidence", Type: "runbook",
+			Scope: "global", Project: "global", Status: "active", PolicyVersion: "v1",
+			Evidence: []LifecycleEvidence{{Ref: "task:t1:review:r1:verified:0", Relation: "support", TaskID: "t1", ReviewRevision: "r1", RecordedAt: "2026-10-12T00:00:00Z"}},
+		},
+		{
+			EvolutionID: "evo_8888888888888888", Title: "two", Statement: "second evidence", Type: "runbook",
+			Scope: "global", Project: "global", Status: "active", PolicyVersion: "v1",
+			Evidence: []LifecycleEvidence{{Ref: "task:t2:review:r2:verified:0", Relation: "support", TaskID: "t2", ReviewRevision: "r2", RecordedAt: "2026-10-12T00:00:00Z"}},
+		},
+	} {
+		_, err := store.TransitionLifecycle(LifecycleTransition{
+			OperationID:      "op_evidencequery0" + string(rune('1'+i)),
+			ExpectedRevision: 0, PolicyVersion: "v1", NextState: "active", Record: record,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, err := store.QueryLifecycle(LifecycleQuery{EvidenceRef: "task:t1:review:r1:verified:0", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].EvolutionID != "evo_7777777777777777" {
+		t.Fatalf("evidence query = %#v", items)
+	}
+}
