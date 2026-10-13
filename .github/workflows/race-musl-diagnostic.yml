@@ -76,6 +76,7 @@ jobs:
             golang:1.26-alpine \
             sh -c '
               set -eu
+              apk add --no-cache build-base >/dev/null
               set +e
               /usr/local/go/bin/go test -race ./... > /tmp/real-race.log 2>&1
               rc=$?
