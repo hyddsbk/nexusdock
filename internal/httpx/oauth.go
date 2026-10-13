@@ -485,6 +485,11 @@ func (s *accessControl) parseOAuthAuthorizationRequest(r *http.Request, values u
 }
 
 func (s *accessControl) oauthIssuer(r *http.Request) string {
+	if s != nil {
+		if publicURL := strings.TrimRight(strings.TrimSpace(s.publicURL), "/"); publicURL != "" {
+			return publicURL
+		}
+	}
 	scheme := "http"
 	host := r.Host
 	if r.TLS != nil {

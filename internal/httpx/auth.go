@@ -27,6 +27,7 @@ type accessControl struct {
 	mcpToken             *auth.MCPTokenStore
 	oauthRegisterLimiter *fixedWindowLimiter
 	trustedProxies       []netip.Prefix
+	publicURL            string
 	logger               *slog.Logger
 }
 

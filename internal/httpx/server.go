@@ -197,6 +197,7 @@ func NewServer(cfg config.Config, store *recall.Store, logger *slog.Logger, opti
 		cfg: cfg, runtimeAI: newRuntimeAIState(store), access: newAccessControl(cfg.TrustedProxies, logger), mcpAppsEnabledState: settings.DefaultMCPAppsEnabled,
 		store: store, logger: logger,
 	}
+	server.access.publicURL = strings.TrimRight(strings.TrimSpace(cfg.PublicURL), "/")
 	for _, option := range options {
 		option(server)
 	}
