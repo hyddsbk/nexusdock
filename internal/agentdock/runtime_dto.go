@@ -15,6 +15,13 @@ import (
 //
 // 只建模 Nexus 真正消费的字段；上游新增字段会被忽略，删除/改名/类型漂移则通过 ContractError 暴露。
 
+// 任务 schema 的显式兼容窗口：旧 transport 可省略 schema_version（零值），
+// 但一旦上游显式提供版本，就只接受已知的 1..11。
+const (
+	runtimeMinReadableTaskSchemaVersion = 1
+	runtimeCurrentTaskSchemaVersion     = 11
+)
+
 // 任务与步骤的合法状态枚举，与 AgentDock internal/taskstate 的常量保持一致。
 var (
 	runtimeTaskStatuses         = []string{"active", "blocked", "completed"}
@@ -163,6 +170,7 @@ type RuntimeTaskStep struct {
 // RuntimeTaskSummary 是任务列表项与任务详情共用的摘要视图。
 // 列表项由上游直接给出计数；详情的计数由解析器按步骤/事件数组推导。
 type RuntimeTaskSummary struct {
+	SchemaVersion       int                 `json:"schema_version,omitempty"`
 	ID                  string              `json:"id"`
 	Title               string              `json:"title"`
 	Goal                string              `json:"goal"`
@@ -524,6 +532,10 @@ func parseRuntimeTaskList(node string, payload map[string]any) ([]RuntimeTaskSum
 
 // parseTaskListItem 解析单个列表项。id 兼容旧版 AgentDock 的 task_id 字段名。
 func (p runtimeParser) parseTaskListItem(field string, task map[string]any) (RuntimeTaskSummary, error) {
+	schemaVersion, err := p.taskSchemaVersion(field+".schema_version", task["schema_version"])
+	if err != nil {
+		return RuntimeTaskSummary{}, err
+	}
 	id, err := p.taskID(field+".id", task)
 	if err != nil {
 		return RuntimeTaskSummary{}, err
@@ -608,13 +620,30 @@ func (p runtimeParser) parseTaskListItem(field string, task map[string]any) (Run
 		return RuntimeTaskSummary{}, err
 	}
 	return RuntimeTaskSummary{
-		ID: id, Title: title, Goal: goal, Status: status, Phase: phase, ReviewStatus: reviewStatus,
+		SchemaVersion: schemaVersion,
+		ID:            id, Title: title, Goal: goal, Status: status, Phase: phase, ReviewStatus: reviewStatus,
 		Summary: summary, Blocker: blocker, CurrentStep: currentStep, Handoff: handoff,
 		RequirementRefs: requirementRefs, RequirementRefCount: requirementRefCount,
 		CompletedStepCount: completedSteps, StepCount: stepCount, ReadyStepCount: readyStepCount,
 		UnknownCount: unknownCount, OpenUnknownCount: openUnknownCount,
 		UpdatedAt: updatedAt, CreatedAt: createdAt, EventCount: eventCount,
 	}, nil
+}
+
+// taskSchemaVersion 读取显式任务 schema。旧 transport 缺失字段时返回 0；
+// 显式版本必须落在当前已知兼容窗口，避免静默吞掉未来契约漂移。
+func (p runtimeParser) taskSchemaVersion(field string, value any) (int, error) {
+	if value == nil {
+		return 0, nil
+	}
+	version, err := p.optionalInt(field, value)
+	if err != nil {
+		return 0, err
+	}
+	if version < runtimeMinReadableTaskSchemaVersion || version > runtimeCurrentTaskSchemaVersion {
+		return 0, p.fail(field, fmt.Sprintf("unsupported task schema version %d; supported explicit versions are %d-%d", version, runtimeMinReadableTaskSchemaVersion, runtimeCurrentTaskSchemaVersion))
+	}
+	return version, nil
 }
 
 // taskID 读取任务 ID；task_id 是旧版 AgentDock 列表项的字段名，保持兼容。
@@ -634,6 +663,10 @@ func parseRuntimeTaskDetail(node, taskID string, payload map[string]any) (Runtim
 	operation := "GET /internal/runtime/tasks/" + taskID
 	p := runtimeParser{node: node, operation: operation}
 	task, err := p.object("task", payload["task"], false)
+	if err != nil {
+		return RuntimeTaskDetail{}, err
+	}
+	schemaVersion, err := p.taskSchemaVersion("task.schema_version", task["schema_version"])
 	if err != nil {
 		return RuntimeTaskDetail{}, err
 	}
@@ -821,7 +854,8 @@ func parseRuntimeTaskDetail(node, taskID string, payload map[string]any) (Runtim
 
 	return RuntimeTaskDetail{
 		Summary: RuntimeTaskSummary{
-			ID: id, Title: title, Goal: goal, Status: status, Phase: phase, ReviewStatus: reviewStatus,
+			SchemaVersion: schemaVersion,
+			ID:            id, Title: title, Goal: goal, Status: status, Phase: phase, ReviewStatus: reviewStatus,
 			Summary: summaryText, Blocker: blocker, CurrentStep: current, Handoff: handoff,
 			RequirementRefs: requirementRefs, RequirementRefCount: len(requirementRefs),
 			CompletedStepCount: completedSteps, StepCount: len(steps), ReadyStepCount: readyStepCount,

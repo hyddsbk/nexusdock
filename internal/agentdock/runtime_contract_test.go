@@ -178,7 +178,7 @@ func TestParseRuntimeTaskList_WrongNumberTypeReturnsContractError(t *testing.T) 
 const currentTaskDetailFixture = `{
   "ok": true, "source": "agentdock-api", "action": "get",
   "task": {
-    "schema_version": 1, "id": "task_01", "title": "修复登录超时", "goal": "登录不再超时",
+    "schema_version": 11, "id": "task_01", "title": "修复登录超时", "goal": "登录不再超时",
     "status": "blocked", "phase": "execute", "blocker": "等待运维确认",
     "summary": "已定位到会话过期配置",
     "steps": [
@@ -208,7 +208,7 @@ func TestParseRuntimeTaskDetail_CurrentNodeResponse(t *testing.T) {
 		t.Fatalf("解析任务详情失败: %v", err)
 	}
 	summary := detail.Summary
-	if summary.ID != "task_01" || summary.Status != "blocked" || summary.Blocker != "等待运维确认" {
+	if summary.SchemaVersion != 11 || summary.ID != "task_01" || summary.Status != "blocked" || summary.Blocker != "等待运维确认" {
 		t.Fatalf("详情摘要字段错误: %#v", summary)
 	}
 	// 详情的进度按完整步骤推导：1 个完成、当前步骤是进行中的 s2。
