@@ -1,5 +1,5 @@
 // Code generated from scripts/generate-contracts.py by swagger-typescript-api. DO NOT EDIT.
-// OpenAPI-SHA256: 296c45683741f8c5af2d780fe9d3f326830d8b9ce825c103e16940ef823e9632
+// OpenAPI-SHA256: 4ab7170e5c9bbfd3118380eb3b73273f605a7aa787ae74550d2c22ee6235ced7
 
 /** 与 Nexus 配对的一台 AgentDock 节点。 */
 export interface AgentDockNode {
@@ -117,6 +117,160 @@ export interface AgentDockPairingCodeResponse {
   ok: boolean;
   /** 短时单次 AgentDock 配对码。 */
   pairing: AgentDockPairingCode;
+}
+
+/** AgentDock 审计信任 freshness checkpoint。 */
+export interface AuditTrustCheckpoint {
+  /** 签名算法。 */
+  algorithm: "ed25519";
+  /** Checkpoint 契约版本。 */
+  contract: "audit-trust-checkpoint/v1";
+  /** 根密钥对 checkpoint statement 的 Base64 签名。 */
+  signature: string;
+  /** 审计信任 checkpoint 中被签名的 freshness statement。 */
+  statement: AuditTrustCheckpointStatement;
+}
+
+/** AgentDock 发布审计信任 checkpoint 与对应注册表。 */
+export interface AuditTrustCheckpointPublishRequest {
+  /** AgentDock 审计信任 freshness checkpoint。 */
+  checkpoint: AuditTrustCheckpoint;
+  /** 由审计根密钥签名的 AgentDock 审计信任注册表。 */
+  registry: AuditTrustRegistry;
+}
+
+/** Nexus 持久化的 AgentDock 审计信任 checkpoint 记录。 */
+export interface AuditTrustCheckpointRecord {
+  /** 已接受注册表的 SHA-256 十六进制摘要。 */
+  registry_sha256: string;
+  /** AgentDock 审计信任 freshness checkpoint。 */
+  checkpoint: AuditTrustCheckpoint;
+  /** AgentDock 稳定设备 ID。 */
+  device_id: string;
+  /**
+   * RFC 3339 UTC 时间。
+   * @format date-time
+   */
+  fresh_until: string;
+  /**
+   * RFC 3339 UTC 时间。
+   * @format date-time
+   */
+  issued_at: string;
+  /** Nexus AgentDock 节点 ID。 */
+  node_id: string;
+  /** 由审计根密钥签名的 AgentDock 审计信任注册表。 */
+  registry: AuditTrustRegistry;
+  /**
+   * 已接受的注册表 revision。
+   * @min 1
+   */
+  registry_revision: number;
+  /** 审计根密钥 ID。 */
+  root_key_id: string;
+  /**
+   * RFC 3339 UTC 时间。
+   * @format date-time
+   */
+  updated_at: string;
+}
+
+/** AgentDock 审计信任 checkpoint 读写响应。 */
+export interface AuditTrustCheckpointResponse {
+  /** 请求是否成功。 */
+  ok: boolean;
+  /** Nexus 持久化的 AgentDock 审计信任 checkpoint 记录。 */
+  trust_checkpoint: AuditTrustCheckpointRecord;
+}
+
+/** 审计信任 checkpoint 中被签名的 freshness statement。 */
+export interface AuditTrustCheckpointStatement {
+  /** 规范化注册表的 SHA-256 十六进制摘要。 */
+  registry_sha256: string;
+  /** Statement 契约版本。 */
+  contract: "audit-trust-checkpoint-statement/v1";
+  /** AgentDock 稳定设备 ID。 */
+  device_id: string;
+  /**
+   * RFC 3339 UTC 时间。
+   * @format date-time
+   */
+  fresh_until: string;
+  /**
+   * RFC 3339 UTC 时间。
+   * @format date-time
+   */
+  issued_at: string;
+  /** Nexus AgentDock 节点 ID。 */
+  node_id: string;
+  /**
+   * 该 checkpoint 绑定的注册表 revision。
+   * @min 1
+   */
+  registry_revision: number;
+  /** 该 checkpoint 绑定的审计根密钥 ID。 */
+  root_key_id: string;
+}
+
+/** 审计签名密钥及其生命周期状态。 */
+export interface AuditTrustKey {
+  /** 签名算法。 */
+  algorithm: "ed25519";
+  /** 由公钥摘要派生的稳定密钥 ID。 */
+  key_id: string;
+  /** Base64 编码的签名公钥。 */
+  public_key: string;
+  /**
+   * RFC 3339 UTC 时间。
+   * @format date-time
+   */
+  retired_at?: string;
+  /**
+   * RFC 3339 UTC 时间。
+   * @format date-time
+   */
+  revoked_at?: string;
+  /** 密钥生命周期状态。 */
+  status: "active" | "retired" | "revoked";
+  /**
+   * RFC 3339 UTC 时间。
+   * @format date-time
+   */
+  valid_from: string;
+}
+
+/** 由审计根密钥签名的 AgentDock 审计信任注册表。 */
+export interface AuditTrustRegistry {
+  /** 注册表契约版本。 */
+  contract: "audit-trust-registry/v1";
+  /** 当前及历史审计签名密钥。 */
+  keys: AuditTrustKey[];
+  /**
+   * 注册表单调递增 revision。
+   * @min 1
+   */
+  revision: number;
+  /** 当前审计根密钥 ID。 */
+  root_key_id: string;
+  /** Base64 编码的审计根公钥。 */
+  root_public_key: string;
+  /** 根密钥对注册表 payload 的 Base64 签名。 */
+  signature: string;
+  /** 审计信任注册表绑定的 AgentDock 节点身份。 */
+  subject: AuditTrustSubject;
+  /**
+   * RFC 3339 UTC 时间。
+   * @format date-time
+   */
+  updated_at: string;
+}
+
+/** 审计信任注册表绑定的 AgentDock 节点身份。 */
+export interface AuditTrustSubject {
+  /** AgentDock 本地稳定设备 ID。 */
+  device_id: string;
+  /** Nexus 分配的 AgentDock 节点 ID。 */
+  node_id: string;
 }
 
 /** 管理员密码更新请求。 */

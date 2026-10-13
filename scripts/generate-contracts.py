@@ -819,6 +819,97 @@ def build_schemas() -> dict[str, dict[str, Any]]:
         },
         ("id", "device_id", "name", "enabled", "capabilities", "online", "created_at", "updated_at"),
     )
+    schemas["AuditTrustSubject"] = obj(
+        "审计信任注册表绑定的 AgentDock 节点身份。",
+        {
+            "node_id": scalar("string", "Nexus 分配的 AgentDock 节点 ID。"),
+            "device_id": scalar("string", "AgentDock 本地稳定设备 ID。"),
+        },
+        ("node_id", "device_id"),
+    )
+    schemas["AuditTrustKey"] = obj(
+        "审计签名密钥及其生命周期状态。",
+        {
+            "key_id": scalar("string", "由公钥摘要派生的稳定密钥 ID。"),
+            "algorithm": enum("签名算法。", ["ed25519"]),
+            "public_key": scalar("string", "Base64 编码的签名公钥。"),
+            "status": enum("密钥生命周期状态。", ["active", "retired", "revoked"]),
+            "valid_from": TIMESTAMP,
+            "retired_at": TIMESTAMP,
+            "revoked_at": TIMESTAMP,
+        },
+        ("key_id", "algorithm", "public_key", "status", "valid_from"),
+    )
+    schemas["AuditTrustRegistry"] = obj(
+        "由审计根密钥签名的 AgentDock 审计信任注册表。",
+        {
+            "contract": enum("注册表契约版本。", ["audit-trust-registry/v1"]),
+            "revision": scalar("integer", "注册表单调递增 revision。", minimum=1),
+            "subject": ref("AuditTrustSubject"),
+            "root_key_id": scalar("string", "当前审计根密钥 ID。"),
+            "root_public_key": scalar("string", "Base64 编码的审计根公钥。"),
+            "keys": array("当前及历史审计签名密钥。", ref("AuditTrustKey")),
+            "updated_at": TIMESTAMP,
+            "signature": scalar("string", "根密钥对注册表 payload 的 Base64 签名。"),
+        },
+        ("contract", "revision", "subject", "root_key_id", "root_public_key", "keys", "updated_at", "signature"),
+    )
+    schemas["AuditTrustCheckpointStatement"] = obj(
+        "审计信任 checkpoint 中被签名的 freshness statement。",
+        {
+            "contract": enum("Statement 契约版本。", ["audit-trust-checkpoint-statement/v1"]),
+            "node_id": scalar("string", "Nexus AgentDock 节点 ID。"),
+            "device_id": scalar("string", "AgentDock 稳定设备 ID。"),
+            "root_key_id": scalar("string", "该 checkpoint 绑定的审计根密钥 ID。"),
+            "registry_revision": scalar("integer", "该 checkpoint 绑定的注册表 revision。", minimum=1),
+            "registry_sha256": scalar("string", "规范化注册表的 SHA-256 十六进制摘要。"),
+            "issued_at": TIMESTAMP,
+            "fresh_until": TIMESTAMP,
+        },
+        ("contract", "node_id", "device_id", "root_key_id", "registry_revision", "registry_sha256", "issued_at", "fresh_until"),
+    )
+    schemas["AuditTrustCheckpoint"] = obj(
+        "AgentDock 审计信任 freshness checkpoint。",
+        {
+            "contract": enum("Checkpoint 契约版本。", ["audit-trust-checkpoint/v1"]),
+            "algorithm": enum("签名算法。", ["ed25519"]),
+            "statement": ref("AuditTrustCheckpointStatement"),
+            "signature": scalar("string", "根密钥对 checkpoint statement 的 Base64 签名。"),
+        },
+        ("contract", "algorithm", "statement", "signature"),
+    )
+    schemas["AuditTrustCheckpointPublishRequest"] = obj(
+        "AgentDock 发布审计信任 checkpoint 与对应注册表。",
+        {
+            "checkpoint": ref("AuditTrustCheckpoint"),
+            "registry": ref("AuditTrustRegistry"),
+        },
+        ("checkpoint", "registry"),
+    )
+    schemas["AuditTrustCheckpointRecord"] = obj(
+        "Nexus 持久化的 AgentDock 审计信任 checkpoint 记录。",
+        {
+            "node_id": scalar("string", "Nexus AgentDock 节点 ID。"),
+            "device_id": scalar("string", "AgentDock 稳定设备 ID。"),
+            "root_key_id": scalar("string", "审计根密钥 ID。"),
+            "registry_revision": scalar("integer", "已接受的注册表 revision。", minimum=1),
+            "registry_sha256": scalar("string", "已接受注册表的 SHA-256 十六进制摘要。"),
+            "issued_at": TIMESTAMP,
+            "fresh_until": TIMESTAMP,
+            "checkpoint": ref("AuditTrustCheckpoint"),
+            "registry": ref("AuditTrustRegistry"),
+            "updated_at": TIMESTAMP,
+        },
+        ("node_id", "device_id", "root_key_id", "registry_revision", "registry_sha256", "issued_at", "fresh_until", "checkpoint", "registry", "updated_at"),
+    )
+    schemas["AuditTrustCheckpointResponse"] = obj(
+        "AgentDock 审计信任 checkpoint 读写响应。",
+        {
+            "ok": scalar("boolean", "请求是否成功。"),
+            "trust_checkpoint": ref("AuditTrustCheckpointRecord"),
+        },
+        ("ok", "trust_checkpoint"),
+    )
     schemas["AgentDockPairingCode"] = obj(
         "短时单次 AgentDock 配对码。",
         {
@@ -1328,6 +1419,22 @@ def build_openapi(schemas: dict[str, Any]) -> dict[str, Any]:
         "/v1/runtime/nodes/pairing-codes": {"post": operation("createAgentDockPairingCode", "生成短时单次 AgentDock 配对码", success=ok(ref("AgentDockPairingCodeResponse")), success_code="201")},
         "/v1/nodes/pair": {"post": operation("pairAgentDockNode", "AgentDock 使用单次码换取 Device Token", request=body(ref("AgentDockPairRequest")), success_code="201")},
         "/v1/nodes/connect": {"get": operation("connectAgentDockNode", "AgentDock 使用 Device Token 升级为反向 WebSocket 连接")},
+        "/v1/nodes/trust-checkpoint": {
+            "put": operation(
+                "publishAgentDockTrustCheckpoint",
+                "AgentDock 使用 Device Token 发布根签名审计信任 checkpoint",
+                request=body(ref("AuditTrustCheckpointPublishRequest")),
+                success=ok(ref("AuditTrustCheckpointResponse")),
+            )
+        },
+        "/v1/trust-checkpoints/{nodeID}": {
+            "get": operation(
+                "getAgentDockTrustCheckpoint",
+                "读取指定 AgentDock 节点最近的根签名审计信任 checkpoint",
+                params=[p("RuntimeNodeId")],
+                success=ok(ref("AuditTrustCheckpointResponse")),
+            )
+        },
         "/v1/runtime/nodes/{nodeID}": {
             "get": operation("getAgentDockNode", "读取 AgentDock 节点", params=[p("RuntimeNodeId")], success=ok(ref("AgentDockNodeResponse"))),
             "patch": operation("updateAgentDockNode", "更新 AgentDock 节点", params=[p("RuntimeNodeId")], request=body(ref("AgentDockNodeUpdateRequest")), success=ok(ref("AgentDockNodeResponse"))),
