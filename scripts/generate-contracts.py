@@ -1516,5 +1516,7 @@ if __name__ == "__main__":
     import json
     import sys
 
-    json.dump(build_openapi(build_schemas()), sys.stdout, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    sys.stdout.write("\n")
+    # 一次性构造 canonical JSON 后写 stdout，避免部分 Python 3.14/pipe 构建环境下
+    # json.dump 的流式 encoder 出现非字符串 chunk 导致 Docker build 偶发失败。
+    output = json.dumps(build_openapi(build_schemas()), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    sys.stdout.write(output + "\n")
