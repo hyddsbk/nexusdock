@@ -17,7 +17,7 @@ const recentTaskWindowMs = 24 * 60 * 60 * 1000;
 function taskStatusLabel(status: string | undefined, t: TFunction): string {
   switch (status) {
     case 'all': return t('All');
-    case 'active': return t('In progress');
+    case 'active': return t('Active tasks');
     case 'completed': return t('Completed');
     case 'blocked': return t('Blocked');
     default: return status || t('Unknown');
@@ -25,7 +25,7 @@ function taskStatusLabel(status: string | undefined, t: TFunction): string {
 }
 
 type TaskStep = { id: string; title: string; status: string };
-type OpsTask = { id: string; title: string; goal: string; status: string; summary?: string; blocker?: string; current_step?: TaskStep; completed_step_count: number; step_count: number; updated_at: string; file_name: string };
+type OpsTask = { id: string; title: string; goal: string; status: string; phase?: string; review_status?: string; summary?: string; blocker?: string; current_step?: TaskStep; completed_step_count: number; step_count: number; updated_at: string; file_name: string };
 type OpsTaskDetail = OpsTask & { steps?: unknown[] };
 type OpsSkill = { id: string; title: string; source: string; path: string; description: string; file_count: number; status: string; skill_ref: string; source_type: string; plugin_name?: string; content_digest: string };
 type OpsSkillFile = { path: string; kind: string; size_bytes: number; updated_at: string };
@@ -58,10 +58,37 @@ function apiMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
-function toneForTask(task: Pick<OpsTask, 'status'>): Tone {
-  if (task.status === 'completed') return 'ok';
-  if (task.status === 'blocked') return 'danger';
-  if (task.status === 'active') return 'warn';
+type TaskLifecycleState = 'completed' | 'blocked' | 'review_failed' | 'ready_to_complete' | 'awaiting_review' | 'in_progress' | 'unknown';
+
+function taskLifecycleState(task: Pick<OpsTask, 'status' | 'review_status' | 'completed_step_count' | 'step_count'>): TaskLifecycleState {
+  if (task.status === 'completed') return 'completed';
+  if (task.status === 'blocked') return 'blocked';
+  if (task.status !== 'active') return 'unknown';
+  if (task.review_status === 'failed') return 'review_failed';
+  if (task.review_status === 'pass') return 'ready_to_complete';
+  const total = Math.max(0, Number(task.step_count) || 0);
+  const completed = Math.max(0, Number(task.completed_step_count) || 0);
+  if (total > 0 && completed >= total) return 'awaiting_review';
+  return 'in_progress';
+}
+
+function taskLifecycleLabel(task: Pick<OpsTask, 'status' | 'review_status' | 'completed_step_count' | 'step_count'>, t: TFunction): string {
+  switch (taskLifecycleState(task)) {
+    case 'completed': return t('Completed');
+    case 'blocked': return t('Blocked');
+    case 'review_failed': return t('Review failed');
+    case 'ready_to_complete': return t('Awaiting completion');
+    case 'awaiting_review': return t('Awaiting final review');
+    case 'in_progress': return t('In progress');
+    default: return taskStatusLabel(task.status, t);
+  }
+}
+
+function toneForTask(task: Pick<OpsTask, 'status' | 'review_status' | 'completed_step_count' | 'step_count'>): Tone {
+  const lifecycle = taskLifecycleState(task);
+  if (lifecycle === 'completed') return 'ok';
+  if (lifecycle === 'blocked' || lifecycle === 'review_failed') return 'danger';
+  if (lifecycle === 'in_progress' || lifecycle === 'awaiting_review' || lifecycle === 'ready_to_complete') return 'warn';
   return 'muted';
 }
 
@@ -103,6 +130,9 @@ function taskCurrentText(task: OpsTask, t: TFunction): string {
   if (task.current_step?.title) return t('Current: {{step}}', { step: task.current_step.title });
   if (task.summary) return task.summary;
   if (task.status === 'completed') return t('Task completed');
+  if (taskLifecycleState(task) === 'review_failed') return t('Review failed');
+  if (taskLifecycleState(task) === 'ready_to_complete') return t('Awaiting completion');
+  if (taskLifecycleState(task) === 'awaiting_review') return t('Awaiting final review');
   return task.step_count > 0 ? t('Waiting for next step') : t('No execution steps split');
 }
 
@@ -232,10 +262,10 @@ export function TaskCenterPage({ nodeID, refreshToken }: { nodeID: string; refre
       <div className="ops-toolbar is-console"><div className="ops-segmented">{(['all', 'active', 'blocked', 'completed'] as TaskStatus[]).map((item) => <button type="button" key={item} className={status === item ? 'is-active' : ''} aria-pressed={status === item} onClick={() => { setStatus(item); setMobileDetailOpen(false); }}><span>{taskStatusLabel(item, t)}</span><em>{statusCounts[item]}</em></button>)}</div><label className="ops-search"><Search size={15} /><input aria-label={t('Search tasks')} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('Search tasks or current step')} /></label><button type="button" className={`nx-button is-secondary is-small ${recentOnly ? 'is-active' : ''}`} aria-pressed={recentOnly} onClick={() => { setRecentOnly((current) => !current); setMobileDetailOpen(false); }}><Clock3 size={15} />{t('Recent 24 hours')}</button><span className="ops-task-toolbar-meta"><span className="ops-auto-refresh"><i aria-hidden="true" />{t('Auto refresh')}</span><span className="ops-count">{t('Showing {{count}} items', { count: tasks.length })}</span></span></div>
       <section className={`ops-master-detail mobile-drilldown ${mobileDetailOpen ? 'is-detail-open' : 'is-list-open'}`}>
         <div className="ops-task-rail mobile-drilldown-list">
-          {tasks.length === 0 ? <EmptyOps text={recentOnly ? t('No matching tasks in the last 24 hours.') : t('No matching tasks.')} /> : tasks.map((task) => <button type="button" key={task.id} className={`ops-task-line ${selected?.id === task.id ? 'is-selected' : ''}`} aria-pressed={selected?.id === task.id} onClick={() => { setSelectedId(task.id); setMobileDetailOpen(true); }}><span className="ops-task-line-title"><strong>{taskDisplayTitle(task, t('Untitled task'))}</strong><span className={`ops-task-state tone-${toneForTask(task)}`}>{taskStatusLabel(task.status, t)}</span></span><TaskProgress task={task} compact /><small>{taskCurrentText(task, t)}</small></button>)}
+          {tasks.length === 0 ? <EmptyOps text={recentOnly ? t('No matching tasks in the last 24 hours.') : t('No matching tasks.')} /> : tasks.map((task) => <button type="button" key={task.id} className={`ops-task-line ${selected?.id === task.id ? 'is-selected' : ''}`} aria-pressed={selected?.id === task.id} onClick={() => { setSelectedId(task.id); setMobileDetailOpen(true); }}><span className="ops-task-line-title"><strong>{taskDisplayTitle(task, t('Untitled task'))}</strong><span className={`ops-task-state tone-${toneForTask(task)}`}>{taskLifecycleLabel(task, t)}</span></span><TaskProgress task={task} compact /><small>{taskCurrentText(task, t)}</small></button>)}
         </div>
         <div className="mobile-drilldown-detail">
-          {selected && <MobileDrilldownBar label={t('Task details')} title={taskDisplayTitle(selected, t('Untitled task'))} meta={taskStatusLabel(selected.status, t)} backLabel={t('Back to task list')} onBack={() => setMobileDetailOpen(false)} />}
+          {selected && <MobileDrilldownBar label={t('Task details')} title={taskDisplayTitle(selected, t('Untitled task'))} meta={taskLifecycleLabel(selected, t)} backLabel={t('Back to task list')} onBack={() => setMobileDetailOpen(false)} />}
           <TaskDetail task={selected} detail={detail.data.task} loading={detail.loading} error={detail.error} deleting={deletingId === selected?.id} onDelete={(task) => { setDeleteError(''); setPendingDelete(task); }} />
         </div>
       </section>
@@ -298,7 +328,9 @@ function TaskDetail({ task, detail, loading, error, deleting, onDelete }: { task
   const full = detail?.id ? detail : task;
   const steps = taskSteps(detail?.steps, t);
   const currentStep = full.current_step || steps.find((step) => step.status === 'in_progress') || steps.find((step) => step.status === 'pending');
-  const currentTitle = currentStep?.title || (full.status === 'completed' ? t('Task completed') : full.status === 'blocked' ? t('Task blocked') : t('Waiting for next step'));
+  const lifecycle = taskLifecycleState(full);
+  const currentTitle = currentStep?.title || (full.status === 'completed' ? t('Task completed') : full.status === 'blocked' ? t('Task blocked') : taskLifecycleLabel(full, t));
+  const currentLabel = lifecycle === 'in_progress' ? t('Current step') : full.status === 'completed' ? t('Result') : t('Current status');
   return <article className="ops-task-detail">
     <header>
       <div><span>{t('Task')}</span><h3>{taskDisplayTitle(full, t('Untitled task'))}</h3>{full.goal && <p>{full.goal}</p>}</div>
@@ -318,7 +350,7 @@ function TaskDetail({ task, detail, loading, error, deleting, onDelete }: { task
     {error && <div className="nx-alert is-error">{error}</div>}
     {full.blocker && <div className="ops-blocker"><ShieldAlert size={15} />{full.blocker}</div>}
     <section className="ops-current-step-text" aria-label={t('Current progress')}>
-      <span>{full.status === 'completed' ? t('Result') : full.status === 'blocked' ? t('Current status') : t('Current step')}</span>
+      <span>{currentLabel}</span>
       <strong>{currentTitle}</strong>
       {full.summary && full.summary !== currentTitle && <p>{full.summary}</p>}
     </section>

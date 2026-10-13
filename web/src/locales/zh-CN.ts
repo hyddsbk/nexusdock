@@ -60,7 +60,7 @@ const common: Record<string, string> = {
   'Disabled': '已停用',
   'Node disabled': '停用',
   'Unknown': '未知',
-  'In progress (24h)': '24h进行中任务',
+  'Active (24h)': '24h活跃任务',
   'Tools': '工具',
   '{{count}} tools': '{{count}} 个',
   'Last online': '最近在线',

@@ -186,9 +186,13 @@ const runtime: Record<string, string> = {
   'Runtime notes': '运行提示',
 
   // RuntimePages
+  'Active tasks': '活跃任务',
   'In progress': '进行中',
   'Completed': '已完成',
   'Blocked': '阻塞',
+  'Awaiting final review': '等待最终审查',
+  'Awaiting completion': '等待完成收口',
+  'Review failed': '审查未通过',
   'Untitled task': '未命名任务',
   'Unsegmented steps': '未拆分步骤',
   'Blocked: {{blocker}}': '阻塞：{{blocker}}',

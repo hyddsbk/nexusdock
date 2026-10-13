@@ -366,7 +366,7 @@ function NodeOverview({ runtimeNodes, runtimeMetrics }: { runtimeNodes: RuntimeN
             <span><small>Skill</small><strong>{metricValue(metrics?.skills)}</strong></span>
             <span><small>MCP</small><strong>{metricValue(metrics?.mcp)}</strong></span>
             <span><small>Plugin</small><strong>{metricValue(metrics?.plugins)}</strong></span>
-            <span><small>{t('In progress (24h)')}</small><strong>{metricValue(metrics?.activeRecent24h)}</strong></span>
+            <span><small>{t('Active (24h)')}</small><strong>{metricValue(metrics?.activeRecent24h)}</strong></span>
             <span><small>{t('Tools')}</small><strong>{t('{{count}} tools', { count: node.capabilities?.length || 0 })}</strong></span>
             <span><small>{t('Last online')}</small><strong>{formatTime(node.last_seen_at, { compact: true })}</strong></span>
           </div>
