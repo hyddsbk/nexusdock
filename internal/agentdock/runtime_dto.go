@@ -17,9 +17,12 @@ import (
 
 // 任务与步骤的合法状态枚举，与 AgentDock internal/taskstate 的常量保持一致。
 var (
-	runtimeTaskStatuses   = []string{"active", "blocked", "completed"}
-	runtimeReviewStatuses = []string{"not_started", "pass", "failed"}
-	runtimeStepStatuses   = []string{"pending", "in_progress", "completed"}
+	runtimeTaskStatuses         = []string{"active", "blocked", "completed"}
+	runtimeReviewStatuses       = []string{"not_started", "pass", "failed"}
+	runtimeStepStatuses         = []string{"pending", "in_progress", "completed"}
+	runtimeEvidenceFactStatuses = []string{"observed", "derived", "inferred", "unknown", "contradicted"}
+	runtimeEvidenceCoverage     = []string{"complete", "partial", "unknown"}
+	runtimeUnknownStatuses      = []string{"open", "resolved"}
 )
 
 type RuntimeDiagnosticStage struct {
@@ -91,6 +94,33 @@ type RuntimeExecutionEvidence struct {
 	EvidenceRefs []string `json:"evidence_refs"`
 }
 
+type RuntimeEvidenceRecord struct {
+	ID               string   `json:"id"`
+	Statement        string   `json:"statement"`
+	FactStatus       string   `json:"fact_status"`
+	SourceRefs       []string `json:"source_refs,omitempty"`
+	Coverage         string   `json:"coverage"`
+	Limitations      []string `json:"limitations,omitempty"`
+	UntrustedContent bool     `json:"untrusted_content,omitempty"`
+	PartialResult    bool     `json:"partial_result,omitempty"`
+	CreatedAt        string   `json:"created_at"`
+}
+
+type RuntimeUnknownRecord struct {
+	ID                     string   `json:"id"`
+	Question               string   `json:"question"`
+	Blocking               bool     `json:"blocking,omitempty"`
+	Status                 string   `json:"status"`
+	Revision               int      `json:"revision"`
+	OpenedStepID           string   `json:"opened_step_id"`
+	EvidenceRefs           []string `json:"evidence_refs,omitempty"`
+	Resolution             string   `json:"resolution,omitempty"`
+	ResolutionEvidenceRefs []string `json:"resolution_evidence_refs,omitempty"`
+	ResolvedStepID         string   `json:"resolved_step_id,omitempty"`
+	OpenedAt               string   `json:"opened_at"`
+	ResolvedAt             string   `json:"resolved_at,omitempty"`
+}
+
 type RuntimeRequirementCoverage struct {
 	RequirementRef string   `json:"requirement_ref"`
 	StepIDs        []string `json:"step_ids"`
@@ -126,6 +156,7 @@ type RuntimeTaskStep struct {
 	Quality              *RuntimeStepQuality        `json:"quality,omitempty"`
 	Diagnostic           *RuntimeDiagnosticEvidence `json:"diagnostic,omitempty"`
 	ExecutionEvidence    *RuntimeExecutionEvidence  `json:"execution_evidence,omitempty"`
+	EvidenceRecords      []RuntimeEvidenceRecord    `json:"evidence_records,omitempty"`
 	UpdatedAt            string                     `json:"updated_at,omitempty"`
 }
 
@@ -147,6 +178,8 @@ type RuntimeTaskSummary struct {
 	CompletedStepCount  int                 `json:"completed_step_count"`
 	StepCount           int                 `json:"step_count"`
 	ReadyStepCount      int                 `json:"ready_step_count"`
+	UnknownCount        int                 `json:"unknown_count,omitempty"`
+	OpenUnknownCount    int                 `json:"open_unknown_count,omitempty"`
 	UpdatedAt           string              `json:"updated_at"`
 	CreatedAt           string              `json:"created_at,omitempty"`
 	TemplateID          string              `json:"template_id,omitempty"`
@@ -175,22 +208,24 @@ type RuntimeOutcomeAxis struct {
 }
 
 type RuntimeTaskFinalReview struct {
-	IntentSpec        *RuntimeOutcomeAxis          `json:"intent_spec,omitempty"`
-	EngineeringPolicy *RuntimeOutcomeAxis          `json:"engineering_policy,omitempty"`
-	Status            string                       `json:"status"`
-	Summary           string                       `json:"summary,omitempty"`
-	VerifiedFacts     []string                     `json:"verified_facts,omitempty"`
-	OpenRisks         []string                     `json:"open_risks,omitempty"`
-	MissingChecks     []string                     `json:"missing_checks,omitempty"`
-	Traceability      *RuntimeTraceabilityCoverage `json:"traceability,omitempty"`
-	ReviewRevision    string                       `json:"review_revision"`
-	ReviewedAt        string                       `json:"reviewed_at,omitempty"`
+	IntentSpec             *RuntimeOutcomeAxis          `json:"intent_spec,omitempty"`
+	EngineeringPolicy      *RuntimeOutcomeAxis          `json:"engineering_policy,omitempty"`
+	Status                 string                       `json:"status"`
+	Summary                string                       `json:"summary,omitempty"`
+	VerifiedFacts          []string                     `json:"verified_facts,omitempty"`
+	AcknowledgedUnknownIDs []string                     `json:"acknowledged_unknown_ids,omitempty"`
+	OpenRisks              []string                     `json:"open_risks,omitempty"`
+	MissingChecks          []string                     `json:"missing_checks,omitempty"`
+	Traceability           *RuntimeTraceabilityCoverage `json:"traceability,omitempty"`
+	ReviewRevision         string                       `json:"review_revision"`
+	ReviewedAt             string                       `json:"reviewed_at,omitempty"`
 }
 
 type RuntimeTaskDetail struct {
 	Summary     RuntimeTaskSummary
 	Conditions  []RuntimeTaskCondition
 	Steps       []RuntimeTaskStep
+	Unknowns    []RuntimeUnknownRecord
 	Events      []RuntimeTaskEvent
 	FinalReview *RuntimeTaskFinalReview
 }
@@ -517,6 +552,17 @@ func (p runtimeParser) parseTaskListItem(field string, task map[string]any) (Run
 	if err != nil {
 		return RuntimeTaskSummary{}, err
 	}
+	unknownCount, err := p.optionalInt(field+".unknown_count", task["unknown_count"])
+	if err != nil {
+		return RuntimeTaskSummary{}, err
+	}
+	openUnknownCount, err := p.optionalInt(field+".open_unknown_count", task["open_unknown_count"])
+	if err != nil {
+		return RuntimeTaskSummary{}, err
+	}
+	if unknownCount < 0 || openUnknownCount < 0 || openUnknownCount > unknownCount {
+		return RuntimeTaskSummary{}, p.fail(field, "unknown counts must be non-negative and open_unknown_count cannot exceed unknown_count")
+	}
 	eventCount, err := p.optionalInt(field+".event_count", task["event_count"])
 	if err != nil {
 		return RuntimeTaskSummary{}, err
@@ -566,6 +612,7 @@ func (p runtimeParser) parseTaskListItem(field string, task map[string]any) (Run
 		Summary: summary, Blocker: blocker, CurrentStep: currentStep, Handoff: handoff,
 		RequirementRefs: requirementRefs, RequirementRefCount: requirementRefCount,
 		CompletedStepCount: completedSteps, StepCount: stepCount, ReadyStepCount: readyStepCount,
+		UnknownCount: unknownCount, OpenUnknownCount: openUnknownCount,
 		UpdatedAt: updatedAt, CreatedAt: createdAt, EventCount: eventCount,
 	}, nil
 }
@@ -607,6 +654,19 @@ func parseRuntimeTaskDetail(node, taskID string, payload map[string]any) (Runtim
 			return RuntimeTaskDetail{}, err
 		}
 		steps = append(steps, step)
+	}
+
+	unknownsRaw, err := p.array("task.unknowns", task["unknowns"], true)
+	if err != nil {
+		return RuntimeTaskDetail{}, err
+	}
+	unknowns := make([]RuntimeUnknownRecord, 0, len(unknownsRaw))
+	for i, item := range unknownsRaw {
+		unknown, err := p.parseUnknownRecord(fieldIndex("task.unknowns", i), item)
+		if err != nil {
+			return RuntimeTaskDetail{}, err
+		}
+		unknowns = append(unknowns, unknown)
 	}
 
 	conditionsRaw, err := p.array("task.conditions", task["conditions"], true)
@@ -752,6 +812,12 @@ func parseRuntimeTaskDetail(node, taskID string, payload map[string]any) (Runtim
 			}
 		}
 	}
+	openUnknownCount := 0
+	for _, unknown := range unknowns {
+		if unknown.Status == "open" {
+			openUnknownCount++
+		}
+	}
 
 	return RuntimeTaskDetail{
 		Summary: RuntimeTaskSummary{
@@ -759,12 +825,14 @@ func parseRuntimeTaskDetail(node, taskID string, payload map[string]any) (Runtim
 			Summary: summaryText, Blocker: blocker, CurrentStep: current, Handoff: handoff,
 			RequirementRefs: requirementRefs, RequirementRefCount: len(requirementRefs),
 			CompletedStepCount: completedSteps, StepCount: len(steps), ReadyStepCount: readyStepCount,
+			UnknownCount: len(unknowns), OpenUnknownCount: openUnknownCount,
 			UpdatedAt: updatedAt, CreatedAt: createdAt,
 			TemplateID: templateID, TemplateVersion: templateVersion,
 			ConditionCount: len(conditions), EventCount: len(events),
 		},
 		Conditions:  conditions,
 		Steps:       steps,
+		Unknowns:    unknowns,
 		Events:      events,
 		FinalReview: finalReview,
 	}, nil
@@ -868,11 +936,23 @@ func (p runtimeParser) parseTaskStep(field string, step map[string]any) (Runtime
 	if err != nil {
 		return RuntimeTaskStep{}, err
 	}
+	evidenceRaw, err := p.array(field+".evidence_records", step["evidence_records"], true)
+	if err != nil {
+		return RuntimeTaskStep{}, err
+	}
+	evidenceRecords := make([]RuntimeEvidenceRecord, 0, len(evidenceRaw))
+	for i, item := range evidenceRaw {
+		record, err := p.parseEvidenceRecord(fieldIndex(field+".evidence_records", i), item)
+		if err != nil {
+			return RuntimeTaskStep{}, err
+		}
+		evidenceRecords = append(evidenceRecords, record)
+	}
 	updatedAt, err := p.optionalString(field+".updated_at", step["updated_at"])
 	if err != nil {
 		return RuntimeTaskStep{}, err
 	}
-	return RuntimeTaskStep{ID: id, Title: title, Status: status, Phase: phase, DependsOn: dependsOn, CompletionConditions: completionConditions, ContextRefs: contextRefs, RequirementRefs: requirementRefs, Quality: quality, Diagnostic: diagnostic, ExecutionEvidence: executionEvidence, UpdatedAt: updatedAt}, nil
+	return RuntimeTaskStep{ID: id, Title: title, Status: status, Phase: phase, DependsOn: dependsOn, CompletionConditions: completionConditions, ContextRefs: contextRefs, RequirementRefs: requirementRefs, Quality: quality, Diagnostic: diagnostic, ExecutionEvidence: executionEvidence, EvidenceRecords: evidenceRecords, UpdatedAt: updatedAt}, nil
 }
 
 func (p runtimeParser) parseOptionalStepQuality(field string, value any) (*RuntimeStepQuality, error) {
@@ -976,6 +1056,140 @@ func (p runtimeParser) parseOptionalExecutionEvidence(field string, value any) (
 	return &RuntimeExecutionEvidence{EvidenceRefs: refs}, nil
 }
 
+func (p runtimeParser) parseEvidenceRecord(field string, value any) (RuntimeEvidenceRecord, error) {
+	record, err := p.object(field, value, false)
+	if err != nil {
+		return RuntimeEvidenceRecord{}, err
+	}
+	id, err := p.requiredString(field+".id", record["id"])
+	if err != nil {
+		return RuntimeEvidenceRecord{}, err
+	}
+	if !validRuntimeOpaqueID(id, "ev_") {
+		return RuntimeEvidenceRecord{}, p.fail(field+".id", "must be a server-issued ev_ identity")
+	}
+	statement, err := p.requiredString(field+".statement", record["statement"])
+	if err != nil {
+		return RuntimeEvidenceRecord{}, err
+	}
+	factStatus, err := p.requiredEnum(field+".fact_status", record["fact_status"], runtimeEvidenceFactStatuses)
+	if err != nil {
+		return RuntimeEvidenceRecord{}, err
+	}
+	sourceRefs, err := p.optionalStringArray(field+".source_refs", record["source_refs"])
+	if err != nil {
+		return RuntimeEvidenceRecord{}, err
+	}
+	coverage, err := p.requiredEnum(field+".coverage", record["coverage"], runtimeEvidenceCoverage)
+	if err != nil {
+		return RuntimeEvidenceRecord{}, err
+	}
+	limitations, err := p.optionalStringArray(field+".limitations", record["limitations"])
+	if err != nil {
+		return RuntimeEvidenceRecord{}, err
+	}
+	untrusted, err := p.optionalBool(field+".untrusted_content", record["untrusted_content"])
+	if err != nil {
+		return RuntimeEvidenceRecord{}, err
+	}
+	partial, err := p.optionalBool(field+".partial_result", record["partial_result"])
+	if err != nil {
+		return RuntimeEvidenceRecord{}, err
+	}
+	createdAt, err := p.requiredString(field+".created_at", record["created_at"])
+	if err != nil {
+		return RuntimeEvidenceRecord{}, err
+	}
+	if factStatus != "unknown" && len(sourceRefs) == 0 {
+		return RuntimeEvidenceRecord{}, p.fail(field+".source_refs", "non-unknown evidence requires at least one source ref")
+	}
+	if factStatus == "unknown" && coverage == "complete" {
+		return RuntimeEvidenceRecord{}, p.fail(field+".coverage", "unknown evidence cannot claim complete coverage")
+	}
+	if partial && coverage == "complete" {
+		return RuntimeEvidenceRecord{}, p.fail(field+".coverage", "partial result cannot claim complete coverage")
+	}
+	return RuntimeEvidenceRecord{
+		ID: id, Statement: statement, FactStatus: factStatus, SourceRefs: sourceRefs,
+		Coverage: coverage, Limitations: limitations, UntrustedContent: untrusted,
+		PartialResult: partial, CreatedAt: createdAt,
+	}, nil
+}
+
+func (p runtimeParser) parseUnknownRecord(field string, value any) (RuntimeUnknownRecord, error) {
+	record, err := p.object(field, value, false)
+	if err != nil {
+		return RuntimeUnknownRecord{}, err
+	}
+	id, err := p.requiredString(field+".id", record["id"])
+	if err != nil {
+		return RuntimeUnknownRecord{}, err
+	}
+	if !validRuntimeOpaqueID(id, "unk_") {
+		return RuntimeUnknownRecord{}, p.fail(field+".id", "must be a server-issued unk_ identity")
+	}
+	question, err := p.requiredString(field+".question", record["question"])
+	if err != nil {
+		return RuntimeUnknownRecord{}, err
+	}
+	blocking, err := p.optionalBool(field+".blocking", record["blocking"])
+	if err != nil {
+		return RuntimeUnknownRecord{}, err
+	}
+	status, err := p.requiredEnum(field+".status", record["status"], runtimeUnknownStatuses)
+	if err != nil {
+		return RuntimeUnknownRecord{}, err
+	}
+	revision, err := p.optionalInt(field+".revision", record["revision"])
+	if err != nil {
+		return RuntimeUnknownRecord{}, err
+	}
+	if revision < 1 {
+		return RuntimeUnknownRecord{}, p.fail(field+".revision", "must be at least 1")
+	}
+	openedStepID, err := p.requiredString(field+".opened_step_id", record["opened_step_id"])
+	if err != nil {
+		return RuntimeUnknownRecord{}, err
+	}
+	evidenceRefs, err := p.optionalStringArray(field+".evidence_refs", record["evidence_refs"])
+	if err != nil {
+		return RuntimeUnknownRecord{}, err
+	}
+	resolution, err := p.optionalString(field+".resolution", record["resolution"])
+	if err != nil {
+		return RuntimeUnknownRecord{}, err
+	}
+	resolutionRefs, err := p.optionalStringArray(field+".resolution_evidence_refs", record["resolution_evidence_refs"])
+	if err != nil {
+		return RuntimeUnknownRecord{}, err
+	}
+	resolvedStepID, err := p.optionalString(field+".resolved_step_id", record["resolved_step_id"])
+	if err != nil {
+		return RuntimeUnknownRecord{}, err
+	}
+	openedAt, err := p.requiredString(field+".opened_at", record["opened_at"])
+	if err != nil {
+		return RuntimeUnknownRecord{}, err
+	}
+	resolvedAt, err := p.optionalString(field+".resolved_at", record["resolved_at"])
+	if err != nil {
+		return RuntimeUnknownRecord{}, err
+	}
+	if status == "resolved" {
+		if resolution == "" || len(resolutionRefs) == 0 || resolvedStepID == "" || resolvedAt == "" {
+			return RuntimeUnknownRecord{}, p.fail(field, "resolved unknown requires resolution, resolution evidence, resolved step, and resolved_at")
+		}
+	} else if resolution != "" || len(resolutionRefs) > 0 || resolvedStepID != "" || resolvedAt != "" {
+		return RuntimeUnknownRecord{}, p.fail(field, "open unknown cannot carry resolution fields")
+	}
+	return RuntimeUnknownRecord{
+		ID: id, Question: question, Blocking: blocking, Status: status, Revision: revision,
+		OpenedStepID: openedStepID, EvidenceRefs: evidenceRefs, Resolution: resolution,
+		ResolutionEvidenceRefs: resolutionRefs, ResolvedStepID: resolvedStepID,
+		OpenedAt: openedAt, ResolvedAt: resolvedAt,
+	}, nil
+}
+
 // parseOptionalTaskStep 解析列表项里的 current_step（只含 id/title/status），缺失或为 null 时返回 nil。
 func (p runtimeParser) parseOptionalTaskStep(field string, value any) (*RuntimeTaskStep, error) {
 	step, err := p.object(field, value, true)
@@ -1029,7 +1243,19 @@ func (p runtimeParser) parseOptionalTaskStep(field string, value any) (*RuntimeT
 	if err != nil {
 		return nil, err
 	}
-	return &RuntimeTaskStep{ID: id, Title: title, Status: status, Phase: phase, DependsOn: dependsOn, CompletionConditions: conditions, ContextRefs: refs, RequirementRefs: requirementRefs, Quality: quality, Diagnostic: diagnostic, ExecutionEvidence: executionEvidence}, nil
+	evidenceRaw, err := p.array(field+".evidence_records", step["evidence_records"], true)
+	if err != nil {
+		return nil, err
+	}
+	evidenceRecords := make([]RuntimeEvidenceRecord, 0, len(evidenceRaw))
+	for i, item := range evidenceRaw {
+		record, err := p.parseEvidenceRecord(fieldIndex(field+".evidence_records", i), item)
+		if err != nil {
+			return nil, err
+		}
+		evidenceRecords = append(evidenceRecords, record)
+	}
+	return &RuntimeTaskStep{ID: id, Title: title, Status: status, Phase: phase, DependsOn: dependsOn, CompletionConditions: conditions, ContextRefs: refs, RequirementRefs: requirementRefs, Quality: quality, Diagnostic: diagnostic, ExecutionEvidence: executionEvidence, EvidenceRecords: evidenceRecords}, nil
 }
 
 func (p runtimeParser) parseTaskCondition(field string, condition map[string]any) (RuntimeTaskCondition, error) {
@@ -1084,6 +1310,15 @@ func (p runtimeParser) parseOptionalFinalReview(field string, value any) (*Runti
 	if err != nil {
 		return nil, err
 	}
+	acknowledgedUnknownIDs, err := p.optionalStringArray(field+".acknowledged_unknown_ids", review["acknowledged_unknown_ids"])
+	if err != nil {
+		return nil, err
+	}
+	for i, id := range acknowledgedUnknownIDs {
+		if !validRuntimeOpaqueID(id, "unk_") {
+			return nil, p.fail(fieldIndex(field+".acknowledged_unknown_ids", i), "must be a server-issued unk_ identity")
+		}
+	}
 	openRisks, err := p.optionalStringArray(field+".open_risks", review["open_risks"])
 	if err != nil {
 		return nil, err
@@ -1113,7 +1348,7 @@ func (p runtimeParser) parseOptionalFinalReview(field string, value any) (*Runti
 		return nil, err
 	}
 	return &RuntimeTaskFinalReview{IntentSpec: intentAxis, EngineeringPolicy: engineeringAxis,
-		Status: status, Summary: summary, VerifiedFacts: verifiedFacts, OpenRisks: openRisks,
+		Status: status, Summary: summary, VerifiedFacts: verifiedFacts, AcknowledgedUnknownIDs: acknowledgedUnknownIDs, OpenRisks: openRisks,
 		MissingChecks: missingChecks, Traceability: traceability, ReviewRevision: reviewRevision, ReviewedAt: reviewedAt,
 	}, nil
 }
