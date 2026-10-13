@@ -38,7 +38,11 @@ func nexusOwnedMCPAppByURI(uri string) (nexusOwnedMCPApp, bool) {
 }
 
 func (s *Server) syncMCPAppResources() {
-	if s == nil || s.mcp == nil || s.mcp.server == nil {
+	if s == nil || s.mcp == nil {
+		return
+	}
+	server := s.mcp.currentServer()
+	if server == nil {
 		return
 	}
 
@@ -70,7 +74,7 @@ func (s *Server) syncMCPAppResources() {
 		if _, ok := desired[uri]; ok {
 			continue
 		}
-		s.mcp.server.RemoveResources(uri)
+		server.RemoveResources(uri)
 		delete(s.mcp.resources, uri)
 	}
 	for _, uri := range sortedMCPAppResourceURIs(desired) {
@@ -85,7 +89,7 @@ func (s *Server) syncMCPAppResources() {
 			title = localApp.Title
 			description = localApp.Description
 		}
-		s.mcp.server.AddResource(&mcpsdk.Resource{
+		server.AddResource(&mcpsdk.Resource{
 			URI:         uri,
 			Name:        mcpAppResourceName(uri),
 			Title:       title,

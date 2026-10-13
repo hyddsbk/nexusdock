@@ -31,35 +31,70 @@ const nexusServerInstructions = "NexusDock 可以连接并统一操作多台 Age
 	"处理多步骤任务时使用 `task_manage` 记录和维护任务进度。根据用户需求选择合适的设备和能力，检查、操作并验证设备状态。"
 
 type mcpGateway struct {
+	serverMu    sync.RWMutex
 	server      *mcpsdk.Server
+	version     string
 	handler     http.Handler
 	resourcesMu sync.RWMutex
 	resources   map[string]struct{}
 }
 
-func newMCPGateway() *mcpGateway {
+func newNexusMCPServer(version string) *mcpsdk.Server {
+	return mcpsdk.NewServer(
+		&mcpsdk.Implementation{Name: "nexusdock", Version: version},
+		&mcpsdk.ServerOptions{
+			Capabilities: &mcpsdk.ServerCapabilities{},
+			Instructions: nexusServerInstructions,
+		},
+	)
+}
+
+func newMCPGateway(version string) *mcpGateway {
 	gateway := &mcpGateway{
-		server: mcpsdk.NewServer(
-			&mcpsdk.Implementation{Name: "nexusdock", Version: "1"},
-			&mcpsdk.ServerOptions{
-				Capabilities: &mcpsdk.ServerCapabilities{},
-				Instructions: nexusServerInstructions,
-			},
-		),
+		server:    newNexusMCPServer(version),
+		version:   version,
 		resources: make(map[string]struct{}),
 	}
 	gateway.handler = mcpsdk.NewStreamableHTTPHandler(
-		func(*http.Request) *mcpsdk.Server { return gateway.server },
+		func(*http.Request) *mcpsdk.Server { return gateway.currentServer() },
 		&mcpsdk.StreamableHTTPOptions{Stateless: true, JSONResponse: true, MaxRequestBodyBytes: 1 << 20, PropagateRequestCancellation: true},
 	)
 	return gateway
+}
+
+func (g *mcpGateway) currentServer() *mcpsdk.Server {
+	if g == nil {
+		return nil
+	}
+	g.serverMu.RLock()
+	defer g.serverMu.RUnlock()
+	return g.server
+}
+
+func (g *mcpGateway) currentVersion() string {
+	if g == nil {
+		return ""
+	}
+	g.serverMu.RLock()
+	defer g.serverMu.RUnlock()
+	return g.version
+}
+
+func (g *mcpGateway) replaceServer(server *mcpsdk.Server, version string) {
+	if g == nil {
+		return
+	}
+	g.serverMu.Lock()
+	g.server = server
+	g.version = version
+	g.serverMu.Unlock()
 }
 
 func (s *Server) initializeMCPGateway() {
 	if s == nil {
 		return
 	}
-	s.mcp = newMCPGateway()
+	s.mcp = newMCPGateway(s.desiredMCPVersion())
 	s.bindMCPGateway()
 }
 
@@ -91,6 +126,8 @@ func (s *Server) bindMCPGateway() {
 		// 启动时也核对一次已发布目录，清理旧版本遗留但 fleet 已不再提供的 stale tool。
 		s.publishedToolBridge.ReconcilePublished()
 	}
+	// 发布目录稳定后，用最终公开工具集合重建一次 MCP server identity。
+	s.refreshMCPServerIdentity()
 	// Nexus 自有的 Context / Recall / Workflow Apps 不依赖任何 AgentDock 节点，启动时始终注册。
 	s.syncMCPAppResources()
 }
@@ -106,22 +143,37 @@ func (s *Server) bindPublishedToolBridge() {
 
 // publishNodeTool 把 Bridge 公开的 fleet 契约映射为 MCP 工具注册（含 MCP Apps 展示元数据过滤）。
 func (s *Server) publishNodeTool(descriptor agentdock.ToolDescriptor) {
-	if s.mcp == nil || s.mcp.server == nil {
+	if s.mcp == nil {
 		return
 	}
-	s.mcp.server.AddTool(nodeMCPToolWithApps(descriptor, s.mcpAppsEnabled()), s.nodeToolHandler(descriptor.Name))
+	server := s.mcp.currentServer()
+	if server == nil {
+		return
+	}
+	server.AddTool(nodeMCPToolWithApps(descriptor, s.mcpAppsEnabled()), s.nodeToolHandler(descriptor.Name))
 }
 
 // retireNodeTool 把 Bridge 的工具下架映射为 MCP SDK 的工具移除。
 func (s *Server) retireNodeTool(toolName string) {
-	if s.mcp == nil || s.mcp.server == nil {
+	if s.mcp == nil {
 		return
 	}
-	s.mcp.server.RemoveTools(toolName)
+	server := s.mcp.currentServer()
+	if server == nil {
+		return
+	}
+	server.RemoveTools(toolName)
 }
 
 func (s *Server) registerCentralTools() {
-	if s == nil || s.mcp == nil || s.mcp.server == nil {
+	if s == nil || s.mcp == nil {
+		return
+	}
+	s.registerCentralToolsOn(s.mcp.currentServer())
+}
+
+func (s *Server) registerCentralToolsOn(server *mcpsdk.Server) {
+	if s == nil || server == nil {
 		return
 	}
 	for _, definition := range nexusToolDefinitionsWithApps(s.mcpAppsEnabled()) {
@@ -130,7 +182,7 @@ func (s *Server) registerCentralTools() {
 		// OutputSchema 在真实调用时执行校验；工具内部仍按各自明确输入结构解码，避免 map
 		// 成为业务数据模型。节点透传工具契约由远端 AgentDock 决定，继续走动态边界。
 		mcpsdk.AddTool[map[string]any, map[string]any](
-			s.mcp.server,
+			server,
 			definition,
 			func(ctx context.Context, request *mcpsdk.CallToolRequest, _ map[string]any) (*mcpsdk.CallToolResult, map[string]any, error) {
 				arguments := json.RawMessage(nil)
@@ -170,17 +222,20 @@ func (s *Server) setMCPAppsEnabled(enabled bool) {
 	changed := s.mcpAppsEnabledState != enabled
 	s.mcpAppsEnabledState = enabled
 	s.mcpAppsMu.Unlock()
-	if !changed || s.mcp == nil || s.mcp.server == nil {
+	if !changed || s.mcp == nil {
 		return
 	}
 
-	// MCP Apps UI 只属于展示层；刷新对外工具和资源，不改节点持久化 descriptor。
+	// 先更新现有 server，保证已连接 session 仍能看到 presentation/resource 变化；
+	// 再为后续新 session 切换到新的 contract-aware identity。
 	s.registerCentralTools()
-	if s.publishedToolBridge != nil {
+	if current := s.mcp.currentServer(); current != nil && s.publishedToolBridge != nil {
 		for _, published := range s.publishedToolBridge.PublishedTools() {
-			s.mcp.server.AddTool(nodeMCPToolWithApps(published.Descriptor, enabled), s.nodeToolHandler(published.Descriptor.Name))
+			current.AddTool(nodeMCPToolWithApps(published.Descriptor, enabled), s.nodeToolHandler(published.Descriptor.Name))
 		}
 	}
+	s.syncMCPAppResources()
+	s.refreshMCPServerIdentity()
 	s.syncMCPAppResources()
 }
 
@@ -190,6 +245,9 @@ func (s *Server) registerNodeTools(node agentdock.Node, hello agentdock.Hello) {
 	if s.publishedToolBridge != nil {
 		s.publishedToolBridge.ObserveNodeHello(node, hello)
 	}
+	// Bridge callbacks 已经更新当前 server；先同步当前 session 的资源，再切换新 identity。
+	s.syncMCPAppResources()
+	s.refreshMCPServerIdentity()
 	s.syncMCPAppResources()
 }
 
@@ -200,6 +258,8 @@ func (s *Server) reconcileNodeTools(descriptors []agentdock.ToolDescriptor) {
 		s.publishedToolBridge.ReconcileNodeTools(descriptors)
 	}
 	s.syncMCPAppResources()
+	s.refreshMCPServerIdentity()
+	s.syncMCPAppResources()
 }
 
 func nodeMCPTool(descriptor agentdock.ToolDescriptor) *mcpsdk.Tool {
@@ -209,7 +269,7 @@ func nodeMCPTool(descriptor agentdock.ToolDescriptor) *mcpsdk.Tool {
 func nodeMCPToolWithApps(descriptor agentdock.ToolDescriptor, mcpAppsEnabled bool) *mcpsdk.Tool {
 	tool := &mcpsdk.Tool{
 		Name: descriptor.Name, Title: descriptor.Title, Description: descriptor.Description,
-		InputSchema: nodeInputSchema(descriptor.InputSchema), OutputSchema: descriptor.OutputSchema,
+		InputSchema: openAICompatibleSchemaProjection(nodeInputSchema(descriptor.InputSchema)), OutputSchema: openAICompatibleSchemaProjection(descriptor.OutputSchema),
 	}
 	if len(descriptor.Annotations) > 0 {
 		encoded, _ := json.Marshal(descriptor.Annotations)
