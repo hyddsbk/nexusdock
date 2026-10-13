@@ -5,8 +5,8 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/nexusdock-race-classifier.XXXXXX")
 trap 'rm -rf "$TMP_DIR"' EXIT HUP INT TERM
 
-KNOWN="$SCRIPT_DIR/testdata/race-known-musl.log"
-REAL="$SCRIPT_DIR/testdata/race-real.log"
+KNOWN="$SCRIPT_DIR/testdata/race-known-musl.fixture"
+REAL="$SCRIPT_DIR/testdata/race-real.fixture"
 MIXED="$TMP_DIR/mixed.log"
 cat "$KNOWN" "$REAL" >"$MIXED"
 

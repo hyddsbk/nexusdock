@@ -1,0 +1,13 @@
+==================
+WARNING: DATA RACE
+Read at 0x00c000010008 by goroutine 8:
+  github.com/uvwt/nexusdock/internal/example.readShared()
+      /src/internal/example/race.go:12 +0x44
+
+Previous write at 0x00c000010008 by goroutine 7:
+  github.com/uvwt/nexusdock/internal/example.writeShared()
+      /src/internal/example/race.go:8 +0x31
+==================
+--- FAIL: TestRealRace (0.01s)
+    testing.go:1712: race detected during execution of test
+FAIL

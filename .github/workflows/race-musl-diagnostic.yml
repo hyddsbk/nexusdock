@@ -51,12 +51,12 @@ jobs:
               chmod +x /tmp/fakebin/go
 
               PATH="/tmp/fakebin:$PATH" \
-                RACE_GATE_FIXTURE="/src/scripts/testdata/race-known-musl.log" \
+                RACE_GATE_FIXTURE="/src/scripts/testdata/race-known-musl.fixture" \
                 sh scripts/test-race.sh
 
               set +e
               PATH="/tmp/fakebin:$PATH" \
-                RACE_GATE_FIXTURE="/src/scripts/testdata/race-real.log" \
+                RACE_GATE_FIXTURE="/src/scripts/testdata/race-real.fixture" \
                 sh scripts/test-race.sh > /tmp/unknown-race.log 2>&1
               rc=$?
               set -e

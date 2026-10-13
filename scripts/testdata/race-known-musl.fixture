@@ -1,0 +1,19 @@
+==================
+WARNING: DATA RACE
+Write at 0x00c0002392b8 by goroutine 11:
+  modernc.org/libc.Xmalloc()
+      /go/pkg/mod/modernc.org/libc@v1.66.10/mem_musl.go:32 +0x11a
+  github.com/uvwt/nexusdock/internal/core.initializeSchema()
+      /src/internal/core/schema.go:308 +0x306
+
+Previous write at 0x00c0002392b8 by goroutine 11:
+  modernc.org/libc.Xmalloc()
+      /go/pkg/mod/modernc.org/libc@v1.66.10/mem_musl.go:32 +0x11a
+  github.com/uvwt/nexusdock/internal/core.initializeSchema()
+      /src/internal/core/schema.go:308 +0x306
+==================
+--- FAIL: TestEnsureSchemaIsIdempotentAndPersistent (0.08s)
+    testing.go:1712: race detected during execution of test
+FAIL
+FAIL    github.com/uvwt/nexusdock/internal/core    0.222s
+FAIL
