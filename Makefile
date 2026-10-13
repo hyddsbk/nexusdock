@@ -9,7 +9,7 @@ BUILD_LDFLAGS := -X github.com/uvwt/nexusdock/internal/buildinfo.Version=$(BUILD
 	-X github.com/uvwt/nexusdock/internal/buildinfo.Revision=$(BUILD_REVISION) \
 	-X github.com/uvwt/nexusdock/internal/buildinfo.Source=$(BUILD_SOURCE)
 
-.PHONY: fmt fmt-check test test-race vet tidy-check contracts repository-check web-deps web-build build build-nexusdock check ci run run-nexusdock clean
+.PHONY: fmt fmt-check test test-race test-race-classifier vet tidy-check contracts repository-check web-deps web-build build build-nexusdock check ci run run-nexusdock clean
 
 fmt:
 	gofmt -w $(GO_SOURCES)
@@ -25,7 +25,10 @@ test:
 	go test ./...
 
 test-race:
-	go test -race ./...
+	sh scripts/test-race.sh
+
+test-race-classifier:
+	sh scripts/test-race-classifier.sh
 
 vet:
 	go vet ./...
@@ -49,7 +52,7 @@ web-deps: $(WEB_INSTALL_STAMP)
 web-build: web-deps
 	cd web && npm run build
 
-check: fmt-check tidy-check test vet contracts repository-check
+check: fmt-check tidy-check test vet contracts repository-check test-race-classifier
 
 ci: web-build check test-race build-nexusdock
 
