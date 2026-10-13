@@ -1,0 +1,103 @@
+name: Race musl diagnostic
+
+on:
+  push:
+    branches:
+      - fix/race-ci-stability
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  musl-ab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reproduce pinned musl allocator race noise
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/src:ro" \
+            -w /src \
+            golang:1.26-alpine \
+            sh -c '
+              set -eu
+              apk add --no-cache build-base git >/dev/null
+              set +e
+              /usr/local/go/bin/go test -race ./internal/core > /tmp/race-baseline.log 2>&1
+              rc=$?
+              set -e
+              cat /tmp/race-baseline.log
+              test "$rc" -ne 0
+              grep -F "modernc.org/libc.Xmalloc" /tmp/race-baseline.log
+              grep -F "mem_musl.go:32" /tmp/race-baseline.log
+            '
+
+      - name: Change only modernc sqlite to the upstream race-fix release
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/src:ro" \
+            -w /work \
+            golang:1.26-alpine \
+            sh -c '
+              set -eu
+              apk add --no-cache build-base git >/dev/null
+              cp -a /src/. /work/
+              cd /work
+              /usr/local/go/bin/go mod edit -require=modernc.org/sqlite@v1.48.2
+              /usr/local/go/bin/go mod tidy
+              /usr/local/go/bin/go list -m modernc.org/sqlite modernc.org/libc
+              /usr/local/go/bin/go test -race ./internal/core
+            '
+
+      - name: Prove the race detector still fails on a real race
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm golang:1.26-alpine sh -c '
+            set -eu
+            mkdir -p /tmp/raceguard
+            cd /tmp/raceguard
+            cat > go.mod <<EOF
+module raceguard
+
+go 1.26
+EOF
+            cat > race_test.go <<EOF
+package raceguard
+
+import (
+    "sync"
+    "testing"
+)
+
+func TestRealRace(t *testing.T) {
+    var x int
+    var wg sync.WaitGroup
+    wg.Add(2)
+    for i := 0; i < 2; i++ {
+        go func() {
+            defer wg.Done()
+            for j := 0; j < 100000; j++ {
+                x++
+            }
+        }()
+    }
+    wg.Wait()
+    _ = x
+}
+EOF
+            set +e
+            /usr/local/go/bin/go test -race ./... > /tmp/real-race.log 2>&1
+            rc=$?
+            set -e
+            cat /tmp/real-race.log
+            test "$rc" -ne 0
+            grep -F "WARNING: DATA RACE" /tmp/real-race.log
+          '
