@@ -16,8 +16,10 @@ import (
 )
 
 const (
-	agentDockContextToolName   = "agentdock_context"
-	agentDockNodeInvokeTimeout = 8 * time.Second
+	agentDockContextToolName       = "agentdock_context"
+	agentDockNodeInvokeTimeout     = 8 * time.Second
+	agentDockContextAttemptTimeout = 4 * time.Second
+	agentDockContextRetryDelay     = 100 * time.Millisecond
 )
 
 var nexusSharedAgentDockRules = []string{
@@ -188,9 +190,9 @@ func (s *Server) callFleetAgentDockContextWithTimeout(ctx context.Context, leafT
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			leafCtx, cancel := context.WithTimeout(ctx, leafTimeout)
-			defer cancel()
-			remote, invokeErr := s.agentDockHub.Invoke(leafCtx, node.ID, protocol.OperationContextLocal, map[string]any{})
+			remote, invokeErr := invokeAgentDockContextWithRetry(ctx, leafTimeout, func(invokeCtx context.Context) (map[string]any, error) {
+				return s.agentDockHub.Invoke(invokeCtx, node.ID, protocol.OperationContextLocal, map[string]any{})
+			})
 			if invokeErr != nil {
 				if errors.Is(invokeErr, context.DeadlineExceeded) {
 					fleet.Nodes[index].Error = "context timeout"
@@ -209,6 +211,63 @@ func (s *Server) callFleetAgentDockContextWithTimeout(ctx context.Context, leafT
 	}
 	wait.Wait()
 	return asBoundaryMap(fleet)
+}
+
+func invokeAgentDockContextWithRetry(ctx context.Context, totalTimeout time.Duration, invoke func(context.Context) (map[string]any, error)) (map[string]any, error) {
+	if totalTimeout <= 0 {
+		return invoke(ctx)
+	}
+	budgetCtx, cancel := context.WithTimeout(ctx, totalTimeout)
+	defer cancel()
+
+	for {
+		if err := budgetCtx.Err(); err != nil {
+			return nil, err
+		}
+
+		attemptTimeout := agentDockContextAttemptTimeout
+		if deadline, ok := budgetCtx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return nil, context.DeadlineExceeded
+			}
+			if attemptTimeout <= 0 || attemptTimeout > remaining {
+				attemptTimeout = remaining
+			}
+		}
+
+		attemptCtx, attemptCancel := context.WithTimeout(budgetCtx, attemptTimeout)
+		result, err := invoke(attemptCtx)
+		attemptCancel()
+		if err == nil {
+			return result, nil
+		}
+		if !isRetryableAgentDockContextError(err) {
+			return nil, err
+		}
+		if err := budgetCtx.Err(); err != nil {
+			return nil, err
+		}
+
+		timer := time.NewTimer(agentDockContextRetryDelay)
+		select {
+		case <-budgetCtx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return nil, budgetCtx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func isRetryableAgentDockContextError(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, agentdock.ErrNodeDisconnected) ||
+		errors.Is(err, agentdock.ErrNodeOffline)
 }
 
 func decodeAgentDockContextResult(result map[string]any) (agentDockContext, error) {

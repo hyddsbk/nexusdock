@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -372,6 +373,26 @@ func connectFleetContextTestNode(t *testing.T, hub *agentdock.Hub, node agentdoc
 			},
 		})
 	}()
+}
+
+func TestInvokeAgentDockContextWithRetryUsesFreshAttemptAfterDisconnect(t *testing.T) {
+	calls := 0
+	result, err := invokeAgentDockContextWithRetry(t.Context(), 250*time.Millisecond, func(ctx context.Context) (map[string]any, error) {
+		calls++
+		if calls == 1 {
+			return nil, agentdock.ErrNodeDisconnected
+		}
+		return map[string]any{"generation": "fresh"}, nil
+	})
+	if err != nil {
+		t.Fatalf("retry context err=%v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("context attempts=%d, want 2", calls)
+	}
+	if result["generation"] != "fresh" {
+		t.Fatalf("context result=%#v", result)
+	}
 }
 
 func TestFleetContextReturnsPartialResultWhenNodeContextTimesOut(t *testing.T) {
