@@ -64,35 +64,30 @@ jobs:
             set -eu
             mkdir -p /tmp/raceguard
             cd /tmp/raceguard
-            cat > go.mod <<EOF
-module raceguard
-
-go 1.26
-EOF
-            cat > race_test.go <<EOF
-package raceguard
-
-import (
-    "sync"
-    "testing"
-)
-
-func TestRealRace(t *testing.T) {
-    var x int
-    var wg sync.WaitGroup
-    wg.Add(2)
-    for i := 0; i < 2; i++ {
-        go func() {
-            defer wg.Done()
-            for j := 0; j < 100000; j++ {
-                x++
-            }
-        }()
-    }
-    wg.Wait()
-    _ = x
-}
-EOF
+            printf "%s\n" "module raceguard" "" "go 1.26" > go.mod
+            printf "%s\n" \
+              "package raceguard" \
+              "" \
+              "import (" \
+              "    \"sync\"" \
+              "    \"testing\"" \
+              ")" \
+              "" \
+              "func TestRealRace(t *testing.T) {" \
+              "    var x int" \
+              "    var wg sync.WaitGroup" \
+              "    wg.Add(2)" \
+              "    for i := 0; i < 2; i++ {" \
+              "        go func() {" \
+              "            defer wg.Done()" \
+              "            for j := 0; j < 100000; j++ {" \
+              "                x++" \
+              "            }" \
+              "        }()" \
+              "    }" \
+              "    wg.Wait()" \
+              "    _ = x" \
+              "}" > race_test.go
             set +e
             /usr/local/go/bin/go test -race ./... > /tmp/real-race.log 2>&1
             rc=$?
