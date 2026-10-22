@@ -74,6 +74,8 @@ type privateNoteManageInput struct {
 
 type workflowTemplateManageInput struct {
 	Action             string             `json:"action"`
+	NodeID             string             `json:"node_id"`
+	AdmissionRef       string             `json:"admission_ref"`
 	Template           *workflow.Template `json:"template"`
 	TemplateID         string             `json:"template_id"`
 	TemplateIDs        []string           `json:"template_ids"`

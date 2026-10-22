@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/uvwt/nexusdock/internal/config"
@@ -40,15 +41,11 @@ func TestCentralWorkflowTemplateManageUsesNexusRegistry(t *testing.T) {
 	}
 	assertCentralToolResultMatchesOutputSchema(t, "workflow_template_manage", many)
 
-	matched, err := callWorkflowTemplateManageForTest(t, server, t.Context(), map[string]any{
+	_, err = callWorkflowTemplateManageForTest(t, server, t.Context(), map[string]any{
 		"action": "match", "goal": "demo development", "device": "DockMini", "type": "development",
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertCentralToolResultMatchesOutputSchema(t, "workflow_template_manage", matched)
-	if matched["action"] != "match" || matched["count"].(int) == 0 {
-		t.Fatalf("match=%#v", matched)
+	if err == nil || !strings.Contains(err.Error(), "node_id is required") {
+		t.Fatalf("central match without Admission node binding err=%v", err)
 	}
 
 	vectorIndex, err := callWorkflowTemplateManageForTest(t, server, t.Context(), map[string]any{"action": "vector_index"})
@@ -64,17 +61,14 @@ func TestCentralWorkflowTemplateManageUsesNexusRegistry(t *testing.T) {
 	}
 }
 
-func TestCentralWorkflowTemplateManageSchemaHasNoNodeID(t *testing.T) {
+func TestCentralWorkflowTemplateManageSchemaExposesAdmissionBindingFields(t *testing.T) {
 	for _, tool := range nexusToolDefinitions() {
 		if tool.Name != "workflow_template_manage" {
 			continue
 		}
 		input := tool.InputSchema.(map[string]any)
 		properties := input["properties"].(map[string]any)
-		if _, exists := properties["node_id"]; exists {
-			t.Fatalf("central workflow schema exposes node_id: %#v", input)
-		}
-		for _, name := range []string{"action", "template", "template_id", "template_ids", "template_version", "template_status", "goal", "device", "type"} {
+		for _, name := range []string{"action", "template", "template_id", "template_ids", "template_version", "template_status", "goal", "device", "type", "node_id", "admission_ref"} {
 			if _, exists := properties[name]; !exists {
 				t.Fatalf("central workflow schema missing %s: %#v", name, properties)
 			}

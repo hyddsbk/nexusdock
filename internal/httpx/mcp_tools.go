@@ -25,7 +25,7 @@ func nexusToolDefinitionsWithApps(mcpAppsEnabled bool) []*mcpsdk.Tool {
 		{name: mcpcontract.ToolRecallWrite, title: "Write NexusDock Recall entry", description: "Plan, create, replace, append, patch, update facts, diff, or delete central Recall content. The model must choose target and action explicitly.", uiURI: protocol.RecallUIResourceURI},
 		{name: mcpcontract.ToolRecallMaintain, title: "Maintain NexusDock Recall", description: "Inspect sync/index state or rebuild the central Recall index."},
 		{name: mcpcontract.ToolPrivateNoteManage, title: "Manage private notes", description: "Explicit low-frequency entrypoint for sensitive private notes."},
-		{name: mcpcontract.ToolWorkflowTemplateManage, title: "Manage workflow templates", description: "List, get, get multiple, publish, retire, or match NexusDock workflow templates. get_many requires the model to compose the returned templates before task creation."},
+		{name: mcpcontract.ToolWorkflowTemplateManage, title: "Manage workflow templates", description: "List, get, get multiple, publish, retire, or admission-bound match NexusDock workflow templates. match requires the target node and frozen admission_ref so the workflow receipt is persisted by that AgentDock node."},
 	}
 	tools := make([]*mcpsdk.Tool, 0, len(presentations))
 	for _, presentation := range presentations {
@@ -39,7 +39,7 @@ func canonicalCentralTool(presentation centralToolPresentation) *mcpsdk.Tool {
 }
 
 func canonicalCentralToolWithApps(presentation centralToolPresentation, mcpAppsEnabled bool) *mcpsdk.Tool {
-	input, inputOK := mcpcontract.InputSchema(presentation.name)
+	input, inputOK := nexusCentralInputSchema(presentation.name)
 	if !inputOK {
 		panic("missing canonical MCP input contract: " + presentation.name)
 	}
@@ -48,7 +48,7 @@ func canonicalCentralToolWithApps(presentation centralToolPresentation, mcpAppsE
 		output = mcpcontract.FleetAgentDockContextOutputSchema()
 	} else {
 		var outputOK bool
-		output, outputOK = mcpcontract.OutputSchema(presentation.name)
+		output, outputOK = nexusCentralOutputSchema(presentation.name)
 		if !outputOK {
 			panic("missing canonical MCP output contract: " + presentation.name)
 		}

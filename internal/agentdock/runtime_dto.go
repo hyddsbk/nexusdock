@@ -16,10 +16,10 @@ import (
 // 只建模 Nexus 真正消费的字段；上游新增字段会被忽略，删除/改名/类型漂移则通过 ContractError 暴露。
 
 // 任务 schema 的显式兼容窗口：旧 transport 可省略 schema_version（零值），
-// 但一旦上游显式提供版本，就只接受已知的 1..11。
+// 但一旦上游显式提供版本，就只接受已知的 1..12。
 const (
 	runtimeMinReadableTaskSchemaVersion = 1
-	runtimeCurrentTaskSchemaVersion     = 11
+	runtimeCurrentTaskSchemaVersion     = 12
 )
 
 // 任务与步骤的合法状态枚举，与 AgentDock internal/taskstate 的常量保持一致。

@@ -44,7 +44,7 @@ func TestTaskSchemaCompatibilityLegacyTaskTransportWithoutSchemaRemainsReadable(
 func TestTaskSchemaCompatibilityFutureTaskSchemaIsRejectedAtBridge(t *testing.T) {
 	payload := fixturePayload(t, `{
 	  "task": {
-	    "schema_version": 12,
+	    "schema_version": 13,
 	    "id": "task_future",
 	    "title": "future",
 	    "status": "active",
@@ -57,8 +57,28 @@ func TestTaskSchemaCompatibilityFutureTaskSchemaIsRejectedAtBridge(t *testing.T)
 }
 
 func TestTaskSchemaCompatibilityPolicyConstants(t *testing.T) {
-	if runtimeMinReadableTaskSchemaVersion != 1 || runtimeCurrentTaskSchemaVersion != 11 {
-		t.Fatalf("task schema window = %d..%d, want 1..11", runtimeMinReadableTaskSchemaVersion, runtimeCurrentTaskSchemaVersion)
+	if runtimeMinReadableTaskSchemaVersion != 1 || runtimeCurrentTaskSchemaVersion != 12 {
+		t.Fatalf("task schema window = %d..%d, want 1..12", runtimeMinReadableTaskSchemaVersion, runtimeCurrentTaskSchemaVersion)
+	}
+}
+
+func TestTaskSchemaCompatibilityTaskSchema12RemainsReadable(t *testing.T) {
+	payload := fixturePayload(t, `{
+	  "task": {
+	    "schema_version": 12,
+	    "id": "task_v12",
+	    "title": "admission-bound task",
+	    "status": "active",
+	    "phase": "execute",
+	    "updated_at": "2026-10-23T00:00:00Z"
+	  }
+	}`)
+	detail, err := parseRuntimeTaskDetail("node_current", "task_v12", payload)
+	if err != nil {
+		t.Fatalf("schema 12 task transport must remain readable: %v", err)
+	}
+	if detail.Summary.SchemaVersion != 12 {
+		t.Fatalf("schema version = %d, want 12", detail.Summary.SchemaVersion)
 	}
 }
 
@@ -78,7 +98,7 @@ func TestTaskSchemaCompatibilityRejectsExplicitZero(t *testing.T) {
 func TestTaskSchemaCompatibilityRejectsFutureSchemaInList(t *testing.T) {
 	payload := fixturePayload(t, `{
 	  "tasks": [{
-	    "schema_version": 12,
+	    "schema_version": 13,
 	    "id": "task_future",
 	    "status": "active",
 	    "review_status": "not_started",

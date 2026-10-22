@@ -31,6 +31,9 @@ func TestCentralToolDefinitionsMatchNexusOwnedCanonicalContract(t *testing.T) {
 		}
 		tool := raw.(*mcpsdk.Tool)
 		wantInput, _ := mcpcontract.InputSchema(name)
+		if name == mcpcontract.ToolWorkflowTemplateManage {
+			wantInput, _ = nexusCentralInputSchema(name)
+		}
 		if !reflect.DeepEqual(tool.InputSchema, wantInput) {
 			t.Fatalf("%s input schema drifted from canonical contract", name)
 		}
@@ -39,6 +42,9 @@ func TestCentralToolDefinitionsMatchNexusOwnedCanonicalContract(t *testing.T) {
 			wantOutput = mcpcontract.FleetAgentDockContextOutputSchema()
 		} else {
 			wantOutput, _ = mcpcontract.OutputSchema(name)
+			if name == mcpcontract.ToolWorkflowTemplateManage {
+				wantOutput, _ = nexusCentralOutputSchema(name)
+			}
 		}
 		if !reflect.DeepEqual(tool.OutputSchema, wantOutput) {
 			t.Fatalf("%s output schema drifted from canonical contract", name)
@@ -96,7 +102,7 @@ func TestCentralRecallAndWorkflowInputContractParity(t *testing.T) {
 	workflow := contractSchemaProperties(t, definitions["workflow_template_manage"].InputSchema)
 	wantWorkflowFields := []string{
 		"action", "template", "template_id", "template_ids", "template_version", "template_status",
-		"allow_long_template", "long_template_reason", "goal", "device", "type",
+		"allow_long_template", "long_template_reason", "goal", "device", "type", "node_id", "admission_ref",
 	}
 	if got := sortedKeys(workflow); !reflect.DeepEqual(got, wantWorkflowFieldsSorted(wantWorkflowFields)) {
 		t.Fatalf("workflow input fields=%v want=%v", got, wantWorkflowFieldsSorted(wantWorkflowFields))

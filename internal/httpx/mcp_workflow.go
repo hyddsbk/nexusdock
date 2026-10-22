@@ -9,7 +9,7 @@ import (
 	"github.com/uvwt/nexusdock/internal/workflow"
 )
 
-const workflowCompositionNextAction = "Combine these templates for the current user goal: prune irrelevant steps, deduplicate, order the remaining steps, and merge completion conditions. Then call task_manage create with source_template_ids, composed steps, and completion_conditions."
+const workflowCompositionNextAction = "Combine these templates into execution steps for the current user goal: prune irrelevant steps, deduplicate, and order the remainder. Do not redefine the frozen Admission success conditions. Then call task_manage create on the same node with the same admission_ref, source_template_ids, and composed steps."
 
 // callWorkflowTemplateManage 只负责 MCP 动作分派和响应形状；
 // Publish/Retire/Get/List/Match/VectorIndex 的业务路径与 REST 共用 workflow operations。
@@ -98,13 +98,7 @@ func (s *Server) callWorkflowTemplateManage(ctx context.Context, input workflowT
 		}, nil
 
 	case "match":
-		result, err := s.executeWorkflowTemplateMatch(
-			ctx, strings.TrimSpace(input.Goal), strings.TrimSpace(input.Device), strings.TrimSpace(input.Type),
-		)
-		if err != nil {
-			return nil, err
-		}
-		return workflowTemplateMatchMCPResult(result), nil
+		return s.callAdmissionBoundWorkflowMatch(ctx, input)
 
 	case "vector_index":
 		result, err := s.executeWorkflowTemplateVectorIndex()

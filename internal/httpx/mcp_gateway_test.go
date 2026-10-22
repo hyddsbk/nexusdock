@@ -75,8 +75,13 @@ func TestInitializeMCPGatewayAdvertisesFixedInstructions(t *testing.T) {
 		central[tool.Name] = true
 		input := tool.InputSchema.(map[string]any)
 		properties := input["properties"].(map[string]any)
-		if _, hasNodeID := properties["node_id"]; hasNodeID {
-			t.Fatalf("fleet-owned central tool %s unexpectedly requires node_id: %#v", tool.Name, input)
+		_, hasNodeID := properties["node_id"]
+		if tool.Name == "workflow_template_manage" {
+			if !hasNodeID {
+				t.Fatalf("admission-bound workflow tool is missing node_id: %#v", input)
+			}
+		} else if hasNodeID {
+			t.Fatalf("fleet-owned central tool %s unexpectedly exposes node_id: %#v", tool.Name, input)
 		}
 	}
 	for name, found := range central {
