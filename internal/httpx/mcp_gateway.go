@@ -26,6 +26,7 @@ import (
 const nexusServerInstructions = "NexusDock 可以连接并统一操作多台 AgentDock 设备。" +
 	"优先调用 `agentdock_context` 获取可用设备、节点标识以及各设备的核心能力、Skill、动态 MCP、Workflow 模板、重要上下文和长期记忆索引。" +
 	"需要操作具体设备时，根据 `agentdock_context` 返回的节点信息选择目标 `node_id`。" +
+	"创建持久 Task 前，先在目标节点调用 `task_manage admit` 冻结验收标准；只有 Admission=pass 后，才用同一 `node_id` 和 `admission_ref` 调用 `workflow_template_manage match`，完成 workflow receipt 后再用同一 `admission_ref` 创建 Task。" +
 	"操作具体项目、切换工作区或工作区规则可能变化时，调用 `workspace_context` 并传入目标 `node_id` 获取该节点的工作区上下文。" +
 	"需要查找或读取长期记忆时使用 `recall_*`；需要查找或使用 Workflow 模板时使用 `workflow_template_manage`；" +
 	"处理多步骤任务时使用 `task_manage` 记录和维护任务进度。根据用户需求选择合适的设备和能力，检查、操作并验证设备状态。"
